@@ -37,5 +37,9 @@ Lee `SPEC.md` antes de cualquier tarea. Si algo contradice el SPEC, detente y pr
 - Un commit por tarea, mensaje en imperativo y claro (`feat:`, `fix:`, `test:`, `docs:`).
 - No reescribas el historial ni hagas push forzado.
 
+## Fases
+- Sigue PHASES.md. Al terminar una fase, ejecuta su puerta de verificación y reporta cada punto como CUMPLE / NO CUMPLE con evidencia.
+- No avances a la siguiente fase sin mi aprobación explícita.
+
 ## Al terminar cada tarea
 Resume en 3–5 líneas: qué cambiaste, qué pruebas agregaste y qué falta.
