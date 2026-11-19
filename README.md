@@ -1,7 +1,7 @@
 # Data Pipeline Tycoon
 
-<!-- Reemplaza <GITHUB_OWNER> por tu usuario u organización al publicar el repositorio -->
-[![CI](https://github.com/<GITHUB_OWNER>/data-pipeline-tycoon/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
+<!-- Reemplaza rayner178 por tu usuario u organización al publicar el repositorio -->
+[![CI](https://github.com/rayner178/data-pipeline-tycoon/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
 
 Plataforma de simulación gamificada para practicar y validar competencias de ingeniería de datos (SQL/PostgreSQL, limpieza de datos y optimización de consultas). Incluye backend en **Python (FastAPI)** con **Clean Architecture** y **PostgreSQL**, catálogo declarativo de retos en `challenges/`, cliente de terminal (`tycoon-cli`) y cliente visual en **Roblox (Luau)**.
 
