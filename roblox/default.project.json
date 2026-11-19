@@ -1,0 +1,27 @@
+{
+  "name": "DataPipelineTycoon",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "DataPipelineTycoon": {
+        "$path": "src/shared"
+      }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "DataPipelineTycoonServer": {
+        "$path": "src/server"
+      }
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "DataPipelineTycoonClient": {
+          "$path": "src/client"
+        }
+      }
+    }
+  }
+}

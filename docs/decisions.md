@@ -138,3 +138,17 @@ Registro breve de las decisiones tomadas en cada fase. El alcance sigue definido
 ### Preview de salida y feedback diagnóstico (`application/` y `api/`)
 - `POST /challenges/{code}/submit` devuelve también `columns` (`list[str]`) y `preview_rows` (`list[list[str]]`, máximo 10 filas de la salida que produjo la **propia** consulta del jugador, formateando `None` como `"NULL"` y truncando celdas > 120 caracteres), sin exponer jamás `expected_result` ni `setup_sql`.
 - Cuando la consulta se ejecuta sin error SQL pero el resultado no coincide con `expected_result`, `SubmitSolution` devuelve un diagnóstico accionable en español indicando si difiere el número de columnas, el número de filas, el orden (`ordered=True`) o los valores.
+
+## Fase 6 — Cliente Roblox (Luau)
+
+### Estructura Open Source compatible con Rojo e interfaz programática (`roblox/`)
+- Se estructuró `roblox/` con `default.project.json` mapeando `src/shared` (`ReplicatedStorage`), `src/server` (`ServerScriptService`) y `src/client` (`StarterPlayerScripts`), manteniendo separación estricta cliente/servidor.
+- Toda la UI (`TerminalGui.client.luau`) se construye programáticamente en Luau para evitar dependencias de archivos binarios `.rbxl` en Git y hacer el cliente 100% auditable y reproducible mediante Rojo o copia manual.
+- `src/shared/ChallengeCatalog.luau` incluye metadatos de apoyo (nombres de `PipelineNode_1..3`, esquemas de entrada/salida, plantillas iniciales y 2 pistas progresivas en español), sin incluir jamás soluciones, `expected_result` ni secretos.
+
+### Seguridad HTTP, cuotas y aislamiento multijugador (`roblox/src/server/`)
+- **Credenciales solo en servidor:** `ApiClient.luau` busca dinámicamente el módulo local opcional `Secrets` (vía `FindFirstChild`, ignorado por Git) y cae a atributos `BASE_URL` y `API_KEY` en `ServerStorage` para funcionar sin código hardcoded tanto en Rojo local como en Roblox Studio.
+- **Protección de cuota `HttpService`:** `ApiClient.luau` cachea `GET /challenges` (TTL 300 s) y `GET /players/{id}/progress` (TTL 15 s, invalidado al aprobar un reto), ejecuta warm-up en segundo plano (`GET /health`) al entrar jugadores (`PlayerAdded` y `Players:GetPlayers()`), y `TerminalServer.server.luau` aplica validación Zero-Trust + bloqueos de concurrencia/cooldown por jugador tanto en `SubmitSql` (3 s) como en `RequestDashboard` (1 s) con limpieza garantizada tras `pcall`.
+- **Compatibilidad Local Server de Studio:** Si `player.UserId <= 0` con `RunService:IsStudio() == true`, `TerminalServer` mapea el ID a `900000000 + math.abs(player.UserId)` con advertencia en log; en servidores publicados rechaza todo `UserId <= 0`.
+- **Visuales estrictamente locales:** El coloreado de `PipelineNode_1..3` en `Workspace` ocurre únicamente en `TerminalGui.client.luau` para que el avance de un jugador no modifique los nodos visibles para otros jugadores en la misma sesión.
+

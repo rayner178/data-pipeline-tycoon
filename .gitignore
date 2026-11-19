@@ -28,3 +28,8 @@ htmlcov/
 *.swp
 .DS_Store
 Thumbs.db
+
+# Roblox Studio & local secrets
+roblox/src/server/Secrets.luau
+*.rbxl
+*.rbxlx
