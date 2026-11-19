@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: data-pipeline-tycoon-api
+    runtime: python
+    plan: free
+    buildCommand: pip install --upgrade uv && uv sync --frozen --no-dev
+    startCommand: bash scripts/start_prod.sh
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.13"
+      - key: PYTHONPATH
+        value: "src"
+      - key: DATABASE_URL
+        sync: false
+      - key: SANDBOX_DATABASE_URL
+        sync: false
+      - key: API_KEY
+        sync: false
