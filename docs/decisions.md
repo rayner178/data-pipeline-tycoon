@@ -43,3 +43,29 @@ Registro breve de las decisiones tomadas en cada fase. El alcance sigue definido
 
 ### Reto 3 (índice)
 - No se puede validar solo por el resultado: la consulta devuelve las mismas filas con o sin índice. En la fase 5 se evaluará además con el plan de ejecución (`EXPLAIN`), y `SubmitSolution` combinará ambas reglas: resultado correcto **y** plan que usa el índice esperado.
+
+## Fase 2 — Aplicación
+
+### Evaluador de SQL (`SolutionEvaluator`)
+- El evaluador **no decide** `passed`: devuelve evidencia (`ExecutionSucceeded` con filas y tiempo, o `ExecutionFailed` con el error del SQL) y `SubmitSolution` aplica las reglas del dominio.
+- Son dataclasses `kw_only`: en la fase 5 se agregará a `ExecutionSucceeded` un campo `plan` con valor por defecto para el reto 3, sin romper el código existente.
+
+### Errores en `SubmitSolution`
+- **Error del SQL del jugador** (`ExecutionFailed`): se guarda como intento fallido y se devuelve `SubmissionResult`.
+- **Resultado no comparable** (`DomainValidationError` al comparar, por ejemplo un tipo de celda no admitido): se trata como fallo del jugador. El intento se guarda con `passed=False` y un mensaje claro, sin 503. Los NaN e infinitos no llegan aquí: el dominio devuelve "no coincide".
+- **Falla de infraestructura**: los adaptadores lanzan **solo** `EvaluatorError`. `SubmitSolution` captura únicamente esa excepción y **no guarda nada**, porque el jugador no tuvo culpa y el intento no llegó a evaluarse. Registra la causa real con `logging` y lanza `EvaluatorUnavailable`, que la API traducirá a 503.
+- No se captura `Exception` genérica: un error inesperado es un fallo de programación y se propaga.
+- Validación antes de escribir: un envío vacío (`EmptySubmission`) o un reto inexistente (`ChallengeNotFound`) no guardan nada ni llaman al evaluador.
+- Orden: validar, buscar el reto, evaluar y juzgar; solo después se crea el jugador (si es nuevo) y se guarda el intento.
+
+### Lecturas
+- `ListChallenges` no expone `setup_sql` ni `expected_result`, porque este último es la respuesta del reto.
+- `GetProgress` con un jugador inexistente devuelve un progreso vacío y no lo crea. Si un `challenge_id` del progreso ya no existe en el repositorio, se omite.
+
+### Unidad de trabajo (para la fase 3)
+- Crear el jugador y guardar el intento debe confirmarse en **una transacción corta**. La evaluación queda fuera: corre con otra conexión y otro rol, y puede tardar hasta `max_seconds`.
+- La carrera de dos primeros envíos simultáneos se resolverá en el repositorio con `INSERT … ON CONFLICT DO NOTHING` seguido de una lectura.
+
+### Pendientes para fases posteriores
+- **Saneamiento de errores (fase 5):** los mensajes de error de PostgreSQL deben sanearse en el adaptador del evaluador antes de llegar a `ExecutionFailed.error_message`. No deben exponer nombres internos de esquemas, roles ni rutas.
+- **Longitud del SQL (fases 4 y 5):** habrá un límite de longitud del SQL enviado. Se definirá en la fase 4 (validación de la API) y se reforzará en la fase 5 (sandbox).
