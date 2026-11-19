@@ -46,6 +46,7 @@ from tests.application.fakes import (
     InMemoryPlayerRepository,
     SequentialIdGenerator,
 )
+from tests.conftest import ensure_test_database
 from tests.domain.factories import NOW, make_challenge
 
 TEST_API_KEY = "test-secret-key-for-roblox"
@@ -459,6 +460,7 @@ def test_openapi_matches_spec_contract_and_docs_load() -> None:
 @contextmanager
 def _seeded_test_db() -> Iterator[tuple[Engine, sessionmaker[Session]]]:
     test_url = resolve_database_url(derive_test_database_url(get_database_url()))
+    ensure_test_database(test_url)
     alembic_cfg = Config(str(REPO_ROOT / "alembic.ini"))
     alembic_cfg.set_main_option("sqlalchemy.url", test_url)
     command.upgrade(alembic_cfg, "head")
