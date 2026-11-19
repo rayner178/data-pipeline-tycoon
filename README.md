@@ -1,23 +1,28 @@
 # Data Pipeline Tycoon
 
-Plataforma de simulación gamificada para practicar y validar competencias de ingeniería de datos (SQL/PostgreSQL, limpieza de datos y optimización de consultas). Cliente visual en **Roblox (Luau)** y backend en **Python (FastAPI)** con **Clean Architecture** y **PostgreSQL**.
+<!-- Reemplaza <GITHUB_OWNER> por tu usuario u organización al publicar el repositorio -->
+[![CI](https://github.com/<GITHUB_OWNER>/data-pipeline-tycoon/actions/workflows/ci.yml/badge.svg)](.github/workflows/ci.yml)
+
+Plataforma de simulación gamificada para practicar y validar competencias de ingeniería de datos (SQL/PostgreSQL, limpieza de datos y optimización de consultas). Incluye backend en **Python (FastAPI)** con **Clean Architecture** y **PostgreSQL**, catálogo declarativo de retos en `challenges/`, cliente de terminal (`tycoon-cli`) y cliente visual en **Roblox (Luau)**.
 
 Proyecto monográfico de UNICARIBE. La fuente de verdad del alcance es [`SPEC.md`](SPEC.md), las reglas de desarrollo están en [`AGENTS.md`](AGENTS.md), las decisiones técnicas en [`docs/decisions.md`](docs/decisions.md) y las puertas por fase en [`PHASES.md`](PHASES.md).
 
 ## Arquitectura y estructura
 
-Las dependencias solo apuntan hacia adentro (`domain` <- `application` <- `infrastructure` / `api`):
+Las dependencias solo apuntan hacia adentro (`domain` <- `application` <- `infrastructure` / `api`); tanto `roblox/` como `src/cli/` son clientes externos que solo se comunican por HTTP:
 
 ```text
+challenges/           # Catálogo declarativo de retos SQL (<slug>/: TOML, SQL, expected_result.json)
 src/
   domain/             # Entidades puras (Player, Challenge, Attempt), matching y reglas EXPLAIN
   application/        # Puertos y casos de uso (ListChallenges, SubmitSolution, GetProgress)
-  infrastructure/     # SQLAlchemy 2, Alembic, repositorios, seed idempotente y sandbox SQL
+  infrastructure/     # SQLAlchemy 2, Alembic, repositorios, challenge_loader, seed y sandbox SQL
   api/                # FastAPI (routers, autenticación X-API-Key, esquemas Pydantic)
+  cli/                # Cliente terminal ligero (tycoon-cli / python -m cli, solo stdlib)
 roblox/               # Cliente Luau compatible con Rojo (véase roblox/README.md)
-scripts/              # Script de arranque reproducible para producción (Render)
-tests/                # Pruebas unitarias, de integración y de seguridad por capa
-.github/workflows/    # CI en GitHub Actions (ruff, mypy, pytest con postgres:16-alpine)
+scripts/              # Arranque de producción (start_prod.sh) y smoke test E2E (smoke_test_e2e.py)
+tests/                # Pruebas unitarias, de integración, CLI y de seguridad por capa
+.github/workflows/    # CI en GitHub Actions (pytest, smoke test E2E, ruff, mypy, selene)
 render.yaml           # Blueprint opcional de despliegue gratuito en Render
 ```
 
@@ -53,6 +58,35 @@ curl http://127.0.0.1:8000/health   # -> {"status":"ok"}
 ```
 
 Para conectar Roblox Studio contra el entorno local o remoto, sigue [`roblox/README.md`](roblox/README.md).
+
+---
+
+## Probar en 30 segundos sin Roblox (`tycoon-cli`)
+
+No necesitas abrir Roblox Studio para jugar o probar retos nuevos. El cliente [`src/cli/`](src/cli) habla exclusivamente por HTTP con la API usando tu `.env` local (o `--base-url` / `--api-key` / `--player-id` / `--timeout`, aceptados antes o después del subcomando):
+
+```bash
+# Modo directo desde el repo (sin instalar el paquete)
+PYTHONPATH=src uv run python -m cli health
+PYTHONPATH=src uv run python -m cli challenges
+PYTHONPATH=src uv run python -m cli submit dedupe-row-number --sql "SELECT customer_id, full_name, email FROM staging_customers;"
+PYTHONPATH=src uv run python -m cli progress
+PYTHONPATH=src uv run python -m cli play
+```
+
+```powershell
+# En Windows PowerShell
+$env:PYTHONPATH="src"; uv run python -m cli play
+```
+
+Si prefieres invocar `tycoon-cli` directamente como comando en tu entorno virtual:
+
+```bash
+uv pip install --no-deps -e .
+tycoon-cli play
+```
+
+*(También funciona contra Render añadiendo `--base-url https://TU-SERVICIO.onrender.com`; el timeout por defecto es `65.0` s para tolerar el cold start.)*
 
 ---
 
@@ -138,9 +172,14 @@ uv run ruff check .
 uv run ruff format --check .
 uv run mypy
 uv run pytest
+uv run python scripts/smoke_test_e2e.py
 ```
 
-- Política de reporte de vulnerabilidades: [`SECURITY.md`](SECURITY.md).
+## Contribuir
+
+¿Quieres proponer un nuevo reto SQL en `challenges/` o mejorar la plataforma?
+- Lee la guía paso a paso en [`CONTRIBUTING.md`](CONTRIBUTING.md).
+- Para vulnerabilidades del sandbox SQL o de autenticación, sigue [`SECURITY.md`](SECURITY.md) (no abras issues públicos con payloads activos).
 
 ## Licencia
 

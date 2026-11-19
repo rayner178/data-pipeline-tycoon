@@ -168,4 +168,18 @@ Registro breve de las decisiones tomadas en cada fase. El alcance sigue definido
 - `render.yaml` instala `uv` y sincroniza dependencias sin paquetes de desarrollo (`pip install --upgrade uv && uv sync --frozen --no-dev`), y `scripts/start_prod.sh` ejecuta `alembic upgrade head`, `infrastructure.seed` y `uvicorn api.app:app --host 0.0.0.0 --port "${PORT:-8000}"` con `uv run --frozen --offline --no-dev` para no depender de descargas en tiempo de arranque.
 - `.github/workflows/ci.yml` levanta `postgres:16-alpine` con healthcheck `pg_isready` y valida `ruff check`, `ruff format --check`, `mypy` y `pytest` en cada `push` y `pull_request`.
 
+## Evolución Open Source — Catálogo declarativo (`challenges/`) y `tycoon-cli` (`src/cli/`)
+
+### Catálogo declarativo de retos SQL (`challenges/<slug>/`)
+- Los retos dejaron de vivir embebidos en Python (`infrastructure/seed.py`) y ahora residen en carpetas declarativas con 5 archivos obligatorios (`challenge.toml`, `setup.sql`, `expected_result.json`, `solution.sql`, `wrong_solution.sql`).
+- `infrastructure/challenge_loader.py` utiliza únicamente `tomllib` y `json` de la librería estándar, exige `code` en kebab-case estricto (`^[a-z0-9]+(?:-[a-z0-9]+)*$`) coincidiendo con el nombre de carpeta y resuelve `DEFAULT_CHALLENGES_DIR` relativo a la raíz del proyecto (`parents[2] / "challenges"`).
+- Si `id` se omite en `challenge.toml` en contribuciones nuevas, se deriva determinísticamente con `uuid5(NAMESPACE_DNS, f"data-pipeline-tycoon.challenge.{code}")` para garantizar seeds idempotentes sin colisiones.
+- `tests/infrastructure/test_challenge_packs.py` parametriza automáticamente cada carpeta de `challenges/` contra PostgreSQL real + `PostgresSandboxEvaluator`, verificando invariantes de dominio, aprobación de `solution.sql` (incluyendo `EXPLAIN`) y fallo esperado de `wrong_solution.sql`.
+
+### Cliente de terminal ligero (`src/cli/`)
+- `src/cli/` actúa estrictamente como un cliente externo desacoplado (igual que `roblox/`), sin importar nada de `domain`, `application`, `infrastructure` ni `api` (verificado vía AST en `tests/cli/test_cli.py`).
+- Usa exclusivamente librería estándar (`urllib.request`, `urllib.parse`, `argparse`, `tomllib`) para funcionar sin dependencias extra (ni siquiera `httpx` de desarrollo), admitiendo flags globales (`--base-url`, `--api-key`, `--player-id`, `--timeout` de 65 s) antes o después del subcomando y escapando `code` con `urllib.parse.quote(code, safe="")`.
+- Se registró `tycoon-cli = "cli.app:main"` en `pyproject.toml` `[project.scripts]` manteniendo `[tool.uv] package = false` para no requerir descargas en `uv run --frozen --offline` y permitir tanto `python -m cli` (con `PYTHONPATH=src`) como `tycoon-cli` tras instalación editable.
+
+
 

@@ -27,11 +27,13 @@ Las dependencias solo apuntan hacia adentro.
 src/
   domain/          # entidades y reglas puras. NO importa FastAPI, SQLAlchemy ni nada externo
   application/     # casos de uso + interfaces (puertos / repositorios abstractos)
-  infrastructure/  # SQLAlchemy, repositorios concretos, sandbox SQL
+  infrastructure/  # SQLAlchemy, repositorios concretos, cargador de retos, sandbox SQL
   api/             # FastAPI: routers, esquemas Pydantic, dependencias
+  cli/             # cliente terminal ligero (solo stdlib HTTP hacia la API)
+challenges/        # catálogo declarativo de retos SQL por carpeta (<slug>/)
 roblox/            # scripts Luau
 tests/
-  domain/ application/ api/ infrastructure/
+  domain/ application/ api/ infrastructure/ cli/
 ```
 
 ## 4. Stack
