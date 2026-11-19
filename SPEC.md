@@ -48,6 +48,7 @@ Reglas de dominio:
   - Si `ordered` es `false` (por defecto), el orden de las filas se ignora, pero las filas duplicadas sí cuentan. Si es `true`, el orden de las filas también debe coincidir.
   - Las reglas detalladas de comparación (columnas, `None`, decimales, booleanos, valores no finitos) están en `docs/decisions.md`.
 - Los intentos se guardan siempre; el progreso se calcula a partir del primer intento exitoso.
+- Un intento exitoso (`passed = true`) exige `execution_ms` y no puede tener `error_message`. Un intento fallido puede tener `execution_ms` nulo, por ejemplo si el SQL no llegó a ejecutarse.
 
 > **Nota (reto 3, índice):** el reto del índice no se puede validar solo por el resultado, porque la consulta devuelve las mismas filas con o sin índice. En la fase 5 se evaluará además con el plan de ejecución (`EXPLAIN`), y `SubmitSolution` combinará ambas reglas: resultado correcto **y** plan que usa el índice esperado.
 
