@@ -12,8 +12,8 @@ from application.ports import SolutionEvaluator
 from application.use_cases.get_progress import GetProgress
 from application.use_cases.list_challenges import ListChallenges
 from application.use_cases.submit_solution import SubmitSolution
-from infrastructure.config import get_api_key
-from infrastructure.db import create_db_engine
+from infrastructure.config import get_api_key, get_sandbox_database_url
+from infrastructure.db import create_db_engine, resolve_database_url
 from infrastructure.repositories import (
     SqlAlchemyAttemptRepository,
     SqlAlchemyChallengeRepository,
@@ -42,7 +42,14 @@ def get_db_session(
 
 @functools.lru_cache(maxsize=1)
 def _cached_sandbox_evaluator() -> PostgresSandboxEvaluator:
-    return PostgresSandboxEvaluator(get_db_engine())
+    raw_sandbox_url = get_sandbox_database_url()
+    sandbox_url = (
+        resolve_database_url(raw_sandbox_url) if raw_sandbox_url is not None else None
+    )
+    return PostgresSandboxEvaluator(
+        get_db_engine(),
+        sandbox_database_url=sandbox_url,
+    )
 
 
 def get_solution_evaluator() -> SolutionEvaluator:

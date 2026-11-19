@@ -18,6 +18,16 @@ def get_api_key(env_file: Path | None = None) -> str:
     return _read_required_env_var("API_KEY", env_file)
 
 
+def get_sandbox_database_url(env_file: Path | None = None) -> str | None:
+    """Read optional SANDBOX_DATABASE_URL from environment (or .env)."""
+    raw = os.environ.get("SANDBOX_DATABASE_URL")
+    if not raw or not raw.strip():
+        raw = _read_dotenv_var("SANDBOX_DATABASE_URL", env_file or _DEFAULT_ENV_PATH)
+    if not raw or not raw.strip():
+        return None
+    return _normalize_psycopg_scheme(raw.strip())
+
+
 def _read_required_env_var(name: str, env_file: Path | None = None) -> str:
     raw = os.environ.get(name)
     if not raw or not raw.strip():

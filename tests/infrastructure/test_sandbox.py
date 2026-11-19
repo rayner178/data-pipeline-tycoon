@@ -564,3 +564,118 @@ def test_mvp_challenges_with_real_sandbox(
     if expected_message is not None:
         assert result.message == expected_message
     assert _count_sandbox_schemas(test_engine) == 0
+
+
+# --- External SANDBOX_DATABASE_URL (Neon / managed Postgres) ---------------
+
+
+@pytest.mark.parametrize(
+    "bad_sandbox_url",
+    [
+        "postgresql://ep-demo.neon.tech:5432/neondb?sslmode=require",
+        "postgresql://neondb_owner:pw@ep-demo.neon.tech:5432/neondb?sslmode=require",
+    ],
+)
+def test_external_sandbox_database_url_rejects_missing_or_matching_admin_user(
+    bad_sandbox_url: str,
+) -> None:
+    admin_engine = create_engine(
+        "postgresql+psycopg://neondb_owner:pw@ep-demo.neon.tech:5432/neondb"
+    )
+    try:
+        with pytest.raises(EvaluatorError):
+            PostgresSandboxEvaluator(admin_engine, sandbox_database_url=bad_sandbox_url)
+    finally:
+        admin_engine.dispose()
+
+
+def test_external_sandbox_database_url_conninfo_and_skips_role_ddl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executed: list[str] = []
+
+    class _FakeAdminConn:
+        def execute(self, stmt: Any, params: Any = None) -> Any:
+            sql_text = stmt.as_string() if hasattr(stmt, "as_string") else str(stmt)
+            executed.append(sql_text)
+            if "pg_catalog." in sql_text or "ALTER DEFAULT PRIVILEGES" in sql_text:
+                raise InsufficientPrivilege("permission denied on managed postgres")
+            return None
+
+        def __enter__(self) -> "_FakeAdminConn":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    admin_engine = create_engine(
+        "postgresql+psycopg://neondb_owner:ownerpw@ep-demo.neon.tech:5432/neondb"
+        "?sslmode=require"
+    )
+    evaluator = PostgresSandboxEvaluator(
+        admin_engine,
+        sandbox_database_url=(
+            "postgres://neon_sandbox:sb_secret@ep-demo.neon.tech:5432/neondb"
+            "?sslmode=require"
+        ),
+    )
+
+    info = psycopg.conninfo.conninfo_to_dict(evaluator._sandbox_conninfo())
+    assert info["host"] == "ep-demo.neon.tech"
+    assert info["user"] == "neon_sandbox"
+    assert info["password"] == "sb_secret"
+    assert info["sslmode"] == "require"
+
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **kw: _FakeAdminConn())
+    evaluator._ensure_provisioned()
+
+    assert evaluator._provisioned is True
+    assert not any("CREATE ROLE" in stmt or "ALTER ROLE" in stmt for stmt in executed)
+    assert any(
+        "REVOKE ALL ON SCHEMA public" in stmt and '"neon_sandbox"' in stmt
+        for stmt in executed
+    )
+    assert any(
+        "REVOKE ALL ON ALL TABLES IN SCHEMA public" in stmt and '"neon_sandbox"' in stmt
+        for stmt in executed
+    )
+    admin_engine.dispose()
+
+
+def test_external_sandbox_database_url_real_execution(test_engine: Engine) -> None:
+    bootstrap = PostgresSandboxEvaluator(test_engine)
+    bootstrap._ensure_provisioned()
+
+    external_url = test_engine.url.set(
+        username=SANDBOX_ROLE,
+        password=bootstrap._sandbox_password,
+    ).render_as_string(hide_password=False)
+    evaluator = PostgresSandboxEvaluator(test_engine, sandbox_database_url=external_url)
+
+    valid = evaluator.evaluate(
+        SAFE_CHALLENGE, "SELECT id, label FROM items ORDER BY id"
+    )
+    work_mem = evaluator.evaluate(SAFE_CHALLENGE, "SELECT current_setting('work_mem')")
+    blocked = evaluator.evaluate(SAFE_CHALLENGE, "SELECT * FROM public.players")
+
+    assert isinstance(valid, ExecutionSucceeded)
+    assert valid.rows == ((1, "uno"), (2, "dos"))
+    assert isinstance(work_mem, ExecutionSucceeded)
+    assert work_mem.rows == (("4MB",),)
+    assert isinstance(blocked, ExecutionFailed)
+    assert SANDBOX_ROLE not in blocked.error_message
+    assert _count_sandbox_schemas(test_engine) == 0
+
+
+def test_sanitize_pg_error_masks_custom_external_roles() -> None:
+    from infrastructure.sandbox import _sanitize_pg_error
+
+    err = psycopg.errors.InsufficientPrivilege(
+        "permission denied for table players for user neon_custom_sb "
+        "in sandbox_0123456789abcdef0123456789abcdef"
+    )
+    sanitized = _sanitize_pg_error(err, extra_names=("neon_custom_sb", "neondb_owner"))
+
+    assert "neon_custom_sb" not in sanitized
+    assert "0123456789abcdef" not in sanitized
+    assert "sandbox_user" in sanitized

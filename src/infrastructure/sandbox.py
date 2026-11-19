@@ -17,12 +17,14 @@ from psycopg.errors import (
     UndefinedFunction,
 )
 from sqlalchemy import Engine
+from sqlalchemy.engine import URL, make_url
 
 from application.errors import EvaluatorError
 from application.evaluation import EvaluationResult, ExecutionFailed, ExecutionSucceeded
 from application.ports import SolutionEvaluator
 from domain.entities import Challenge
 from domain.result_matching import Cell, FrozenResult
+from infrastructure.config import _normalize_psycopg_scheme
 
 MAX_SQL_LENGTH = 8_000
 MAX_RESULT_ROWS = 1_000
@@ -90,6 +92,7 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
         self,
         admin_engine: Engine,
         *,
+        sandbox_database_url: str | None = None,
         max_rows: int = MAX_RESULT_ROWS,
         max_sql_length: int = MAX_SQL_LENGTH,
     ) -> None:
@@ -98,6 +101,28 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
         self._max_sql_length = max_sql_length
         self._sandbox_password = secrets.token_urlsafe(32)
         self._provisioned = False
+        self._sandbox_url: URL | None = None
+        self._sandbox_role: str = SANDBOX_ROLE
+
+        if sandbox_database_url is not None and sandbox_database_url.strip():
+            parsed_sandbox = make_url(
+                _normalize_psycopg_scheme(sandbox_database_url.strip())
+            )
+            sandbox_user = parsed_sandbox.username
+            if not sandbox_user:
+                raise EvaluatorError(
+                    "SANDBOX_DATABASE_URL must specify a database username"
+                )
+            if (
+                self._admin_engine.url.username
+                and sandbox_user == self._admin_engine.url.username
+            ):
+                raise EvaluatorError(
+                    "SANDBOX_DATABASE_URL must use a least-privilege role "
+                    "separate from DATABASE_URL"
+                )
+            self._sandbox_url = parsed_sandbox
+            self._sandbox_role = sandbox_user
 
     def evaluate(self, challenge: Challenge, sql: str) -> EvaluationResult:
         try:
@@ -122,13 +147,21 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
         )
 
     def _sandbox_conninfo(self) -> str:
+        if self._sandbox_url is not None:
+            return self._make_conninfo(
+                user=self._sandbox_url.username or "",
+                password=self._sandbox_url.password or "",
+                base_url=self._sandbox_url,
+            )
         return self._make_conninfo(
             user=SANDBOX_ROLE,
             password=self._sandbox_password,
         )
 
-    def _make_conninfo(self, *, user: str, password: str) -> str:
-        url = self._admin_engine.url
+    def _make_conninfo(
+        self, *, user: str, password: str, base_url: URL | None = None
+    ) -> str:
+        url = base_url if base_url is not None else self._admin_engine.url
         extra_params: dict[str, str] = {}
         for key, raw_value in url.query.items():
             if key in _RESERVED_CONNINFO_KEYS:
@@ -160,28 +193,29 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
 
     def _provision_role_and_locks(self, conn: psycopg.Connection[Any]) -> None:
         db_name = self._admin_engine.url.database or "postgres"
-        role_ident = pg_sql.Identifier(SANDBOX_ROLE)
+        role_ident = pg_sql.Identifier(self._sandbox_role)
         db_ident = pg_sql.Identifier(db_name)
-        password_lit = pg_sql.Literal(self._sandbox_password)
 
-        role_exists = conn.execute(
-            "SELECT 1 FROM pg_roles WHERE rolname = %s",
-            (SANDBOX_ROLE,),
-        ).fetchone()
-        if role_exists is None:
-            conn.execute(
-                pg_sql.SQL(
-                    "CREATE ROLE {} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
-                    "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD {}"
-                ).format(role_ident, password_lit)
-            )
-        else:
-            conn.execute(
-                pg_sql.SQL(
-                    "ALTER ROLE {} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
-                    "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD {}"
-                ).format(role_ident, password_lit)
-            )
+        if self._sandbox_url is None:
+            password_lit = pg_sql.Literal(self._sandbox_password)
+            role_exists = conn.execute(
+                "SELECT 1 FROM pg_roles WHERE rolname = %s",
+                (SANDBOX_ROLE,),
+            ).fetchone()
+            if role_exists is None:
+                conn.execute(
+                    pg_sql.SQL(
+                        "CREATE ROLE {} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                        "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD {}"
+                    ).format(role_ident, password_lit)
+                )
+            else:
+                conn.execute(
+                    pg_sql.SQL(
+                        "ALTER ROLE {} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE "
+                        "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD {}"
+                    ).format(role_ident, password_lit)
+                )
 
         for stmt in (
             pg_sql.SQL("REVOKE ALL ON SCHEMA public FROM PUBLIC, {}").format(
@@ -204,32 +238,37 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
                 "REVOKE CREATE, TEMPORARY ON DATABASE {} FROM PUBLIC, {}"
             ).format(db_ident, role_ident),
         ):
-            conn.execute(stmt)
+            try:
+                conn.execute(stmt)
+            except InsufficientPrivilege:
+                continue
 
-        conn.execute(
-            pg_sql.SQL("ALTER ROLE {} SET work_mem = '4MB'").format(role_ident)
-        )
-        try:
+        if self._sandbox_url is None:
             conn.execute(
-                pg_sql.SQL("ALTER ROLE {} SET temp_file_limit = '10MB'").format(
-                    role_ident
-                )
+                pg_sql.SQL("ALTER ROLE {} SET work_mem = '4MB'").format(role_ident)
             )
-        except InsufficientPrivilege:
-            pass
+            try:
+                conn.execute(
+                    pg_sql.SQL("ALTER ROLE {} SET temp_file_limit = '10MB'").format(
+                        role_ident
+                    )
+                )
+            except InsufficientPrivilege:
+                pass
 
+        quoted_role = role_ident.as_string()
         for fn_signature in _DANGEROUS_FUNCTIONS:
             try:
                 conn.execute(
                     f"REVOKE EXECUTE ON FUNCTION {fn_signature} "
-                    f"FROM PUBLIC, {SANDBOX_ROLE}"
+                    f"FROM PUBLIC, {quoted_role}"
                 )
             except (UndefinedFunction, InsufficientPrivilege):
                 continue
 
     def _prepare_schema(self, schema_name: str, setup_sql: str) -> None:
         schema_ident = pg_sql.Identifier(schema_name)
-        role_ident = pg_sql.Identifier(SANDBOX_ROLE)
+        role_ident = pg_sql.Identifier(self._sandbox_role)
         try:
             with psycopg.connect(self._admin_conninfo(), autocommit=False) as conn:
                 with conn.transaction():
@@ -334,8 +373,16 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
                 execution_ms=None,
             )
         except psycopg.Error as exc:
+            extra_names = tuple(
+                name
+                for name in (
+                    self._sandbox_role,
+                    self._admin_engine.url.username or "",
+                )
+                if name
+            )
             return ExecutionFailed(
-                error_message=_sanitize_pg_error(exc),
+                error_message=_sanitize_pg_error(exc, extra_names=extra_names),
                 execution_ms=None,
             )
 
@@ -356,11 +403,13 @@ def _convert_cell(value: object) -> Cell:
     return str(value)
 
 
-def _sanitize_pg_error(exc: psycopg.Error) -> str:
+def _sanitize_pg_error(exc: psycopg.Error, extra_names: tuple[str, ...] = ()) -> str:
     primary = exc.diag.message_primary if exc.diag is not None else None
     raw = primary or str(exc).splitlines()[0]
     cleaned = _SANDBOX_SCHEMA_RE.sub("sandbox", raw)
     cleaned = _INTERNAL_NAMES_RE.sub("sandbox_user", cleaned)
+    for name in extra_names:
+        cleaned = re.sub(rf"\b{re.escape(name)}\b", "sandbox_user", cleaned)
     return cleaned.strip() or "Error al ejecutar la consulta SQL."
 
 
