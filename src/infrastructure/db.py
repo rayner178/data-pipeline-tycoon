@@ -5,7 +5,7 @@ import subprocess
 import sys
 
 from sqlalchemy import Engine, create_engine, text
-from sqlalchemy.engine import make_url
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.exc import OperationalError
 
 from infrastructure.config import get_database_url
@@ -19,14 +19,14 @@ def resolve_database_url(url: str) -> str:
     parsed = make_url(url)
     if sys.platform != "win32" or parsed.host not in _LOCAL_HOSTS:
         return url
-    if _can_connect(url):
+    if _can_connect_server(parsed):
         return url
     wsl_ip = _detect_wsl_ip()
     if not wsl_ip:
         return url
-    candidate = parsed.set(host=wsl_ip).render_as_string(hide_password=False)
-    if _can_connect(candidate):
-        return candidate
+    wsl_parsed = parsed.set(host=wsl_ip)
+    if _can_connect_server(wsl_parsed):
+        return wsl_parsed.render_as_string(hide_password=False)
     return url
 
 
@@ -34,6 +34,17 @@ def create_db_engine(url: str | None = None) -> Engine:
     """Create a SQLAlchemy Engine from the given URL or DATABASE_URL."""
     resolved = resolve_database_url(url if url is not None else get_database_url())
     return create_engine(resolved, pool_pre_ping=True)
+
+
+def _can_connect_server(parsed_url: URL) -> bool:
+    if _can_connect(parsed_url.render_as_string(hide_password=False)):
+        return True
+    if parsed_url.database and parsed_url.database != "postgres":
+        admin_url = parsed_url.set(database="postgres").render_as_string(
+            hide_password=False
+        )
+        return _can_connect(admin_url)
+    return False
 
 
 def _can_connect(url: str) -> bool:

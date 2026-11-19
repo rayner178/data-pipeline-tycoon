@@ -12,6 +12,7 @@ from application.ports import (
     IdGenerator,
     PlayerRepository,
     SolutionEvaluator,
+    UnitOfWork,
 )
 from domain.entities import Attempt, Challenge, Player
 from tests.domain.factories import NOW
@@ -91,3 +92,22 @@ class SequentialIdGenerator(IdGenerator):
         new = UUID(int=len(self.generated) + 1)
         self.generated.append(new)
         return new
+
+
+class FakeUnitOfWork(UnitOfWork):
+    """Records transaction lifecycle calls for unit tests."""
+
+    def __init__(self) -> None:
+        self.entered = 0
+        self.committed = 0
+        self.rolled_back = 0
+
+    def __enter__(self) -> "FakeUnitOfWork":
+        self.entered += 1
+        return self
+
+    def commit(self) -> None:
+        self.committed += 1
+
+    def rollback(self) -> None:
+        self.rolled_back += 1

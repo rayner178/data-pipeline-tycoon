@@ -17,6 +17,7 @@ from application.errors import (
     EvaluatorUnavailable,
 )
 from application.evaluation import ExecutionFailed, ExecutionSucceeded
+from application.ports import UnitOfWork
 from application.use_cases.submit_solution import (
     MESSAGE_INCOMPARABLE,
     MESSAGE_MISMATCH,
@@ -26,6 +27,7 @@ from application.use_cases.submit_solution import (
 from domain.entities import Challenge, Player
 from tests.application.fakes import (
     FakeEvaluator,
+    FakeUnitOfWork,
     FixedClock,
     InMemoryAttemptRepository,
     InMemoryChallengeRepository,
@@ -51,6 +53,7 @@ class Env:
         default_factory=InMemoryAttemptRepository
     )
     ids: SequentialIdGenerator = field(default_factory=SequentialIdGenerator)
+    uow: UnitOfWork | None = None
 
     @property
     def use_case(self) -> SubmitSolution:
@@ -61,6 +64,7 @@ class Env:
             evaluator=self.evaluator,
             clock=FixedClock(NOW),
             ids=self.ids,
+            uow=self.uow,
         )
 
     def submit(self, sql: str = SQL, code: str = "dedupe") -> SubmissionResult:
@@ -285,3 +289,76 @@ def test_two_submissions_create_a_single_player() -> None:
 
     assert len(env.players.players) == 1
     assert len(env.attempts.attempts) == 2
+
+
+# --- UnitOfWork and race handling -------------------------------------------
+
+
+def test_submit_solution_commits_unit_of_work() -> None:
+    uow = FakeUnitOfWork()
+    env = make_env(FakeEvaluator(CORRECT))
+    env.uow = uow
+
+    env.submit()
+
+    assert uow.entered == 1
+    assert uow.committed == 1
+    assert uow.rolled_back == 0
+    assert len(env.attempts.attempts) == 1
+
+
+def test_evaluator_error_does_not_open_unit_of_work() -> None:
+    uow = FakeUnitOfWork()
+    env = make_env(FakeEvaluator(error=EvaluatorError("db down")))
+    env.uow = uow
+
+    with pytest.raises(EvaluatorUnavailable):
+        env.submit()
+
+    assert uow.entered == 0
+    assert uow.committed == 0
+    assert uow.rolled_back == 0
+
+
+def test_write_failure_rolls_back_unit_of_work() -> None:
+    class FailingAttemptRepo(InMemoryAttemptRepository):
+        def add(self, attempt: Any) -> None:
+            raise RuntimeError("disk full")
+
+    uow = FakeUnitOfWork()
+    env = make_env(FakeEvaluator(CORRECT))
+    env.attempts = FailingAttemptRepo()
+    env.uow = uow
+
+    with pytest.raises(RuntimeError, match="disk full"):
+        env.submit()
+
+    assert uow.entered == 1
+    assert uow.committed == 0
+    assert uow.rolled_back == 1
+
+
+def test_concurrent_first_submission_uses_persisted_player() -> None:
+    winner = make_player(id=UUID(int=999), roblox_user_id=ROBLOX_USER)
+
+    class RacingPlayerRepo(InMemoryPlayerRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self._lookup_count = 0
+
+        def get_by_roblox_user_id(self, roblox_user_id: int) -> Player | None:
+            self._lookup_count += 1
+            if self._lookup_count == 1:
+                return None  # first check before concurrent insert wins
+            return winner
+
+        def add(self, player: Player) -> None:
+            # Simulates INSERT ... ON CONFLICT DO NOTHING losing the race
+            return None
+
+    env = Env(evaluator=FakeEvaluator(CORRECT), players=RacingPlayerRepo())
+
+    env.submit()
+
+    [attempt] = env.attempts.attempts
+    assert attempt.player_id == winner.id

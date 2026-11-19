@@ -19,6 +19,7 @@ from application.ports import (
     IdGenerator,
     PlayerRepository,
     SolutionEvaluator,
+    UnitOfWork,
 )
 from domain.entities import Attempt, Challenge, Player
 from domain.errors import DomainValidationError
@@ -55,6 +56,7 @@ class SubmitSolution:
         evaluator: SolutionEvaluator,
         clock: Clock,
         ids: IdGenerator,
+        uow: UnitOfWork | None = None,
     ) -> None:
         self._players = players
         self._challenges = challenges
@@ -62,6 +64,7 @@ class SubmitSolution:
         self._evaluator = evaluator
         self._clock = clock
         self._ids = ids
+        self._uow = uow
 
     def execute(self, *, roblox_user_id: int, code: str, sql: str) -> SubmissionResult:
         if not sql.strip():
@@ -71,13 +74,33 @@ class SubmitSolution:
             raise ChallengeNotFound(code)
         outcome = _judge(challenge, self._evaluate(challenge, sql))
         now = self._clock.now()
-        player = self._get_or_create_player(roblox_user_id, now)
-        self._attempts.add(self._build_attempt(player, challenge, sql, outcome, now))
+        self._persist_attempt(roblox_user_id, challenge, sql, outcome, now)
         return SubmissionResult(
             passed=outcome.passed,
             execution_ms=outcome.execution_ms,
             message=outcome.message,
         )
+
+    def _persist_attempt(
+        self,
+        roblox_user_id: int,
+        challenge: Challenge,
+        sql: str,
+        outcome: _Outcome,
+        now: datetime,
+    ) -> None:
+        if self._uow is None:
+            player = self._get_or_create_player(roblox_user_id, now)
+            self._attempts.add(
+                self._build_attempt(player, challenge, sql, outcome, now)
+            )
+            return
+        with self._uow:
+            player = self._get_or_create_player(roblox_user_id, now)
+            self._attempts.add(
+                self._build_attempt(player, challenge, sql, outcome, now)
+            )
+            self._uow.commit()
 
     def _evaluate(self, challenge: Challenge, sql: str) -> EvaluationResult:
         try:
@@ -89,10 +112,12 @@ class SubmitSolution:
     def _get_or_create_player(self, roblox_user_id: int, now: datetime) -> Player:
         player = self._players.get_by_roblox_user_id(roblox_user_id)
         if player is None:
-            player = Player(
+            candidate = Player(
                 id=self._ids.new_id(), roblox_user_id=roblox_user_id, created_at=now
             )
-            self._players.add(player)
+            self._players.add(candidate)
+            # Re-read so a concurrent ON CONFLICT DO NOTHING winner is used if present.
+            player = self._players.get_by_roblox_user_id(roblox_user_id) or candidate
         return player
 
     def _build_attempt(

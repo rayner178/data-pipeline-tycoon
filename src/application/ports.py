@@ -2,6 +2,8 @@
 
 from abc import ABC, abstractmethod
 from datetime import datetime
+from types import TracebackType
+from typing import Self
 from uuid import UUID
 
 from application.evaluation import EvaluationResult
@@ -51,3 +53,25 @@ class Clock(ABC):
 class IdGenerator(ABC):
     @abstractmethod
     def new_id(self) -> UUID: ...
+
+
+class UnitOfWork(ABC):
+    """Transaction boundary around write operations."""
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        if exc_type is not None:
+            self.rollback()
+
+    @abstractmethod
+    def commit(self) -> None: ...
+
+    @abstractmethod
+    def rollback(self) -> None: ...
