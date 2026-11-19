@@ -69,3 +69,25 @@ Registro breve de las decisiones tomadas en cada fase. El alcance sigue definido
 ### Pendientes para fases posteriores
 - **Saneamiento de errores (fase 5):** los mensajes de error de PostgreSQL deben sanearse en el adaptador del evaluador antes de llegar a `ExecutionFailed.error_message`. No deben exponer nombres internos de esquemas, roles ni rutas.
 - **Longitud del SQL (fases 4 y 5):** habrá un límite de longitud del SQL enviado. Se definirá en la fase 4 (validación de la API) y se reforzará en la fase 5 (sandbox).
+
+## Fase 3 — Infraestructura y persistencia
+
+### Serialización de `expected_result` (`infrastructure/serialization.py`)
+- En PostgreSQL se guarda en una columna `JSONB` como lista de listas.
+- Los valores `Decimal` se codifican explícitamente como `{"__type__": "decimal", "value": "..."}` para preservar su precisión y escala exactas sin colisionar con celdas de texto numérico (`"1.25"` frente a `Decimal("1.25")`).
+- Al leer de la base de datos se valida la estructura completa y se reconstruye `FrozenResult` (`tuple[tuple[Cell, ...], ...]`).
+
+### Modelos ORM separados y mapeo explícito (`infrastructure/orm.py`)
+- `PlayerModel`, `ChallengeModel` y `AttemptModel` usan SQLAlchemy 2 (`DeclarativeBase`, `Mapped`, `mapped_column`), separados de las entidades puras de dominio y traducidos mediante funciones explícitas `*_to_domain` / `*_from_domain`.
+- Todas las fechas usan `DateTime(timezone=True)` (`TIMESTAMPTZ`), `roblox_user_id` usa `BIGINT` con restricción única, `challenges.code` tiene restricción única y existen índices en `challenges(difficulty, code)`, `attempts(player_id)` y `attempts(challenge_id)`.
+
+### Unidad de trabajo y carrera del primer envío (`infrastructure/uow.py`, `infrastructure/repositories.py`)
+- Se añadió el puerto `UnitOfWork(ABC)` en `application/ports.py` y se inyectó opcionalmente en `SubmitSolution` para delimitar una transacción corta alrededor de la creación/lectura del jugador y el guardado del intento (dejando la evaluación SQL fuera de la transacción).
+- `SqlAlchemyPlayerRepository.add` usa `INSERT ... ON CONFLICT (roblox_user_id) DO NOTHING` y `SubmitSolution` relee el jugador para garantizar que el intento quede asociado al `id` ganador persistido ante envíos concurrentes.
+
+### Base de pruebas y resolución Windows → WSL2 (`infrastructure/config.py`, `infrastructure/db.py`)
+- `DATABASE_URL` se lee exclusivamente del entorno (o `.env` en local). Las pruebas de integración usan siempre una base separada (`*_test`, p. ej. `tycoon_test`, o `TEST_DATABASE_URL`), rechazando cualquier ejecución sobre la base de desarrollo.
+- En Windows, si un servicio PostgreSQL local ocupa el puerto 5432 en `localhost`, `resolve_database_url` detecta la IP de WSL2 (`wsl hostname -I`) como fallback sin modificar `.env`.
+
+### Seed idempotente (`infrastructure/seed.py`)
+- Los 3 retos del MVP se siembran de forma idempotente mediante `INSERT ... ON CONFLICT (code) DO UPDATE` con datos de ejemplo (`setup_sql` y `expected_result` provisionales hasta la fase 5).
