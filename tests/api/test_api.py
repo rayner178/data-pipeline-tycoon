@@ -1,6 +1,7 @@
 """Tests for the FastAPI layer, X-API-Key authentication, schemas and OpenAPI."""
 
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 from uuid import uuid4
@@ -9,7 +10,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import Engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from api.app import create_app
@@ -34,6 +35,7 @@ from infrastructure.config import (
     get_database_url,
 )
 from infrastructure.db import create_db_engine, resolve_database_url
+from infrastructure.sandbox import PostgresSandboxEvaluator
 from infrastructure.seed import seed_mvp_challenges
 from tests.application.fakes import (
     FakeEvaluator,
@@ -421,7 +423,8 @@ def test_openapi_matches_spec_contract_and_docs_load() -> None:
 # --- Integration with PostgreSQL test DB ------------------------------------
 
 
-def test_api_end_to_end_with_postgres_repositories() -> None:
+@contextmanager
+def _seeded_test_db() -> Iterator[tuple[Engine, sessionmaker[Session]]]:
     test_url = resolve_database_url(derive_test_database_url(get_database_url()))
     alembic_cfg = Config(str(REPO_ROOT / "alembic.ini"))
     alembic_cfg.set_main_option("sqlalchemy.url", test_url)
@@ -437,6 +440,17 @@ def test_api_end_to_end_with_postgres_repositories() -> None:
         factory = sessionmaker(bind=engine, expire_on_commit=False)
         with factory() as seed_session:
             seed_mvp_challenges(seed_session)
+        yield engine, factory
+    finally:
+        with engine.begin() as conn:
+            conn.execute(text("DELETE FROM attempts"))
+            conn.execute(text("DELETE FROM players"))
+            conn.execute(text("DELETE FROM challenges"))
+        engine.dispose()
+
+
+def test_api_end_to_end_with_postgres_repositories() -> None:
+    with _seeded_test_db() as (_engine, factory):
 
         def override_session() -> Iterator[Session]:
             with factory() as session:
@@ -446,7 +460,14 @@ def test_api_end_to_end_with_postgres_repositories() -> None:
         app.dependency_overrides[get_configured_api_key] = lambda: TEST_API_KEY
         app.dependency_overrides[get_db_session] = override_session
         app.dependency_overrides[get_solution_evaluator] = lambda: FakeEvaluator(
-            ExecutionSucceeded(rows=((1, "Ana"), (2, "Luis")), execution_ms=19)
+            ExecutionSucceeded(
+                rows=(
+                    (1, "Ana Pérez", "ana@example.com"),
+                    (2, "Luis Gómez", "luis@example.com"),
+                    (3, "Marta Díaz", None),
+                ),
+                execution_ms=19,
+            )
         )
         client = TestClient(app)
 
@@ -471,9 +492,50 @@ def test_api_end_to_end_with_postgres_repositories() -> None:
         assert len(progress.json()["completed"]) == 1
         assert progress.json()["completed"][0]["code"] == "dedupe-row-number"
         assert progress.json()["completed"][0]["best_ms"] == 19
-    finally:
-        with engine.begin() as conn:
-            conn.execute(text("DELETE FROM attempts"))
-            conn.execute(text("DELETE FROM players"))
-            conn.execute(text("DELETE FROM challenges"))
-        engine.dispose()
+
+
+def test_api_end_to_end_with_real_sql_sandbox() -> None:
+    with _seeded_test_db() as (engine, factory):
+
+        def override_session() -> Iterator[Session]:
+            with factory() as session:
+                yield session
+
+        evaluator = PostgresSandboxEvaluator(engine)
+        app = create_app()
+        app.dependency_overrides[get_configured_api_key] = lambda: TEST_API_KEY
+        app.dependency_overrides[get_db_session] = override_session
+        app.dependency_overrides[get_solution_evaluator] = lambda: evaluator
+        client = TestClient(app)
+
+        attack = client.post(
+            "/challenges/dedupe-row-number/submit",
+            headers=AUTH_HEADERS,
+            json={"roblox_user_id": 888, "sql": "SELECT * FROM public.players"},
+        )
+        assert attack.status_code == 200
+        assert attack.json()["passed"] is False
+
+        solved = client.post(
+            "/challenges/dedupe-row-number/submit",
+            headers=AUTH_HEADERS,
+            json={
+                "roblox_user_id": 888,
+                "sql": (
+                    "WITH ranked AS ("
+                    "SELECT customer_id, full_name, email, "
+                    "ROW_NUMBER() OVER ("
+                    "PARTITION BY customer_id ORDER BY updated_at DESC"
+                    ") AS rn FROM staging_customers"
+                    ") SELECT customer_id, full_name, email FROM ranked WHERE rn = 1"
+                ),
+            },
+        )
+        assert solved.status_code == 200
+        assert solved.json()["passed"] is True
+        assert solved.json()["execution_ms"] is not None
+
+        progress = client.get("/players/888/progress", headers=AUTH_HEADERS)
+        assert progress.status_code == 200
+        assert len(progress.json()["completed"]) == 1
+        assert progress.json()["completed"][0]["code"] == "dedupe-row-number"

@@ -8,13 +8,10 @@ from fastapi import Depends
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
-from application.errors import EvaluatorError
-from application.evaluation import EvaluationResult
 from application.ports import SolutionEvaluator
 from application.use_cases.get_progress import GetProgress
 from application.use_cases.list_challenges import ListChallenges
 from application.use_cases.submit_solution import SubmitSolution
-from domain.entities import Challenge
 from infrastructure.config import get_api_key
 from infrastructure.db import create_db_engine
 from infrastructure.repositories import (
@@ -22,13 +19,9 @@ from infrastructure.repositories import (
     SqlAlchemyChallengeRepository,
     SqlAlchemyPlayerRepository,
 )
+from infrastructure.sandbox import PostgresSandboxEvaluator
 from infrastructure.system import UtcClock, Uuid4Generator
 from infrastructure.uow import SqlAlchemyUnitOfWork
-
-
-class _UnconfiguredEvaluator(SolutionEvaluator):
-    def evaluate(self, challenge: Challenge, sql: str) -> EvaluationResult:
-        raise EvaluatorError("SQL sandbox evaluator is not configured yet (phase 5)")
 
 
 def get_configured_api_key() -> str:
@@ -47,8 +40,13 @@ def get_db_session(
         yield session
 
 
+@functools.lru_cache(maxsize=1)
+def _cached_sandbox_evaluator() -> PostgresSandboxEvaluator:
+    return PostgresSandboxEvaluator(get_db_engine())
+
+
 def get_solution_evaluator() -> SolutionEvaluator:
-    return _UnconfiguredEvaluator()
+    return _cached_sandbox_evaluator()
 
 
 def get_list_challenges_use_case(

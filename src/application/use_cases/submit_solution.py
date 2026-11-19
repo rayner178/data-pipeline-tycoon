@@ -23,12 +23,16 @@ from application.ports import (
 )
 from domain.entities import Attempt, Challenge, Player
 from domain.errors import DomainValidationError
+from domain.execution_plan import plan_uses_index
 
 logger = logging.getLogger(__name__)
 
 MESSAGE_SOLVED = "¡Reto superado!"
 MESSAGE_MISMATCH = "El resultado no coincide con el esperado."
 MESSAGE_INCOMPARABLE = "El resultado contiene valores que no se pueden comparar."
+MESSAGE_INDEX_NOT_USED = (
+    "El resultado es correcto, pero el plan de ejecución no utiliza el índice esperado."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,5 +154,10 @@ def _judge(challenge: Challenge, evaluation: EvaluationResult) -> _Outcome:
         return _Outcome(
             False, evaluation.execution_ms, MESSAGE_INCOMPARABLE, MESSAGE_INCOMPARABLE
         )
-    message = MESSAGE_SOLVED if solved else MESSAGE_MISMATCH
-    return _Outcome(solved, evaluation.execution_ms, None, message)
+    if not solved:
+        return _Outcome(False, evaluation.execution_ms, None, MESSAGE_MISMATCH)
+    if challenge.requires_index_plan() and (
+        evaluation.plan is None or not plan_uses_index(evaluation.plan)
+    ):
+        return _Outcome(False, evaluation.execution_ms, None, MESSAGE_INDEX_NOT_USED)
+    return _Outcome(True, evaluation.execution_ms, None, MESSAGE_SOLVED)

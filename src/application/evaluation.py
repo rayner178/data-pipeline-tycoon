@@ -16,7 +16,7 @@ class ExecutionSucceeded:
 
     rows: FrozenResult
     execution_ms: int
-    # Phase 5 (challenge 3): plan: ExecutionPlan | None = None
+    plan: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -107,3 +107,19 @@ Registro breve de las decisiones tomadas en cada fase. El alcance sigue definido
 - Los routers no contienen lógica de negocio: solo reciben entrada validada, llaman al caso de uso y serializan el DTO de salida.
 - `EmptySubmission` → `422`, `ChallengeNotFound` → `404` y `EvaluatorUnavailable` → `503`, todos con mensajes fijos en español en `ErrorResponse(detail=...)` sin filtrar trazas, hosts ni credenciales internas.
 - Hasta la fase 5, la dependencia por defecto `get_solution_evaluator` devuelve un adaptador que lanza `EvaluatorError`, traducido limpiamente a `503`.
+
+## Fase 5 — Sandbox SQL y los 3 retos del MVP
+
+### Aislamiento de rol y esquema (`infrastructure/sandbox.py`)
+- **Conexión independiente de permisos mínimos (`tycoon_sandbox_player`):** en vez de usar `SET LOCAL ROLE` sobre la conexión administradora (`tycoon`), se abre una segunda conexión TCP autenticada directamente como `tycoon_sandbox_player` (sin privilegios de superusuario, creación, herencia ni bypass RLS, y con contraseña aleatoria en memoria). Así `session_user` tampoco tiene privilegios y resulta imposible escapar con `RESET ROLE` o `SET ROLE`.
+- **Esquema desechable por intento (`sandbox_<hex>`):** la conexión administradora crea el esquema temporal, carga `setup_sql`, concede únicamente `USAGE` en el esquema y `SELECT` sobre sus tablas a `tycoon_sandbox_player`, y ejecuta siempre `DROP SCHEMA IF EXISTS ... CASCADE` en un bloque `finally` incluso si la consulta falla.
+- **Bloqueo de `public` y funciones peligrosas:** se revocan de `PUBLIC` y `tycoon_sandbox_player` el acceso/creación sobre `public`, `CREATE`/`TEMPORARY` sobre la base de datos y `EXECUTE` sobre `set_config`, `pg_terminate_backend`, `pg_cancel_backend`, `pg_reload_conf`, `pg_read_file*`, `pg_ls_dir*` y `pg_stat_file*`.
+
+### Validación de sentencia única, límites y saneamiento
+- **Doble barrera:** `validate_single_select_sql` refuerza `MAX_SQL_LENGTH = 8000`, ignora comentarios/literales para rechazar cualquier `;` intermedio y exige inicio con `SELECT` o `WITH`. Además, la consulta se ejecuta con un cursor nombrado de `psycopg` (`DECLARE ... CURSOR`), que usa el protocolo extendido de PostgreSQL y rechaza múltiples sentencias y comandos no `SELECT`.
+- **Límites:** `SET LOCAL statement_timeout` derivado de `challenge.max_seconds`, `lock_timeout = 500ms` y lectura acotada con `fetchmany(max_rows + 1)` (`MAX_RESULT_ROWS = 1000`).
+- **Conversión y saneamiento:** `date`, `datetime`, `time` y `UUID` se convierten a `str`; los errores de PostgreSQL se traducen a mensajes en español eliminando el nombre del esquema temporal y los nombres internos de rol.
+
+### Evaluación de plan `EXPLAIN` para el reto 3 (`domain/execution_plan.py`)
+- `Challenge.requires_index_plan()` detecta la presencia de `CREATE INDEX` en `setup_sql`.
+- Cuando es `True`, `PostgresSandboxEvaluator` ejecuta `EXPLAIN (COSTS OFF)` dentro de la misma transacción aislada y `SubmitSolution` exige resultado coincidente **y** uso de `Index Scan`, `Index Only Scan` o `Bitmap Index Scan` en el plan (`plan_uses_index`).

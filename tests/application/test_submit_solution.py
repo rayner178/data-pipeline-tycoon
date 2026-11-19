@@ -20,6 +20,7 @@ from application.evaluation import ExecutionFailed, ExecutionSucceeded
 from application.ports import UnitOfWork
 from application.use_cases.submit_solution import (
     MESSAGE_INCOMPARABLE,
+    MESSAGE_INDEX_NOT_USED,
     MESSAGE_MISMATCH,
     MESSAGE_SOLVED,
     SubmitSolution,
@@ -362,3 +363,56 @@ def test_concurrent_first_submission_uses_persisted_player() -> None:
 
     [attempt] = env.attempts.attempts
     assert attempt.player_id == winner.id
+
+
+# --- Execution plan (Challenge 3) -------------------------------------------
+
+
+def test_index_challenge_fails_when_plan_does_not_use_index() -> None:
+    indexed = make_challenge(
+        code="index-slow-query",
+        setup_sql=(
+            "CREATE TABLE events (id INT, user_id INT);\n"
+            "CREATE INDEX idx_events_user ON events (user_id);"
+        ),
+        expected_result=[[1, "login"]],
+    )
+    seq_scan = ExecutionSucceeded(
+        rows=((1, "login"),),
+        execution_ms=18,
+        plan="Seq Scan on events\n  Filter: ((user_id)::text = '42'::text)",
+    )
+    env = make_env(FakeEvaluator(seq_scan), challenges=[indexed])
+
+    result = env.submit(code="index-slow-query")
+
+    assert result == SubmissionResult(
+        passed=False, execution_ms=18, message=MESSAGE_INDEX_NOT_USED
+    )
+    [attempt] = env.attempts.attempts
+    assert attempt.passed is False
+    assert attempt.error_message is None
+
+
+def test_index_challenge_passes_when_rows_and_plan_use_index() -> None:
+    indexed = make_challenge(
+        code="index-slow-query",
+        setup_sql=(
+            "CREATE TABLE events (id INT, user_id INT);\n"
+            "CREATE INDEX idx_events_user ON events (user_id);"
+        ),
+        expected_result=[[1, "login"]],
+    )
+    index_scan = ExecutionSucceeded(
+        rows=((1, "login"),),
+        execution_ms=2,
+        plan="Index Scan using idx_events_user on events",
+    )
+    env = make_env(FakeEvaluator(index_scan), challenges=[indexed])
+
+    result = env.submit(code="index-slow-query")
+
+    assert result == SubmissionResult(
+        passed=True, execution_ms=2, message=MESSAGE_SOLVED
+    )
+    assert env.attempts.attempts[0].passed is True

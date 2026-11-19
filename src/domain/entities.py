@@ -6,6 +6,7 @@ from enum import IntEnum
 from uuid import UUID
 
 from domain.errors import DomainValidationError
+from domain.execution_plan import setup_creates_index
 from domain.result_matching import QueryResult, freeze_expected_result, results_match
 
 
@@ -55,6 +56,10 @@ class Challenge:
     def is_solved_by(self, actual: QueryResult) -> bool:
         """A challenge is solved when the player's result matches the expected one."""
         return results_match(actual, self.expected_result, ordered=self.ordered)
+
+    def requires_index_plan(self) -> bool:
+        """Return True when the challenge expects the query plan to use an index."""
+        return setup_creates_index(self.setup_sql)
 
 
 @dataclass(frozen=True, slots=True)
