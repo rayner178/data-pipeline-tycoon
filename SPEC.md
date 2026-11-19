@@ -39,13 +39,17 @@ Python 3.12 · FastAPI · Pydantic v2 · SQLAlchemy 2 + Alembic · psycopg 3 · 
 
 ## 5. Modelo de datos (borrador)
 - **Player**: id, roblox_user_id (único), created_at.
-- **Challenge**: id, code (único), module, title, description, difficulty, setup_sql, expected_result (JSON), max_seconds.
+- **Challenge**: id, code (único), module, title, description, difficulty, setup_sql, expected_result (JSON), max_seconds, ordered (bool, por defecto `false`).
 - **Attempt**: id, player_id, challenge_id, submitted_sql, passed (bool), execution_ms, error_message, created_at.
 - **Progress** (derivado o tabla): player_id, challenge_id, completed_at, best_ms.
 
 Reglas de dominio:
 - Un reto se considera superado cuando el resultado de la consulta del jugador coincide con `expected_result`.
+  - Si `ordered` es `false` (por defecto), el orden de las filas se ignora, pero las filas duplicadas sí cuentan. Si es `true`, el orden de las filas también debe coincidir.
+  - Las reglas detalladas de comparación (columnas, `None`, decimales, booleanos, valores no finitos) están en `docs/decisions.md`.
 - Los intentos se guardan siempre; el progreso se calcula a partir del primer intento exitoso.
+
+> **Nota (reto 3, índice):** el reto del índice no se puede validar solo por el resultado, porque la consulta devuelve las mismas filas con o sin índice. En la fase 5 se evaluará además con el plan de ejecución (`EXPLAIN`), y `SubmitSolution` combinará ambas reglas: resultado correcto **y** plan que usa el índice esperado.
 
 ## 6. Contrato de API (borrador)
 | Método | Ruta | Descripción |
