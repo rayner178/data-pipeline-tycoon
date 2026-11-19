@@ -1,0 +1,14 @@
+[
+  [
+    1,
+    "Comercial Norte",
+    {"__type__": "decimal", "value": "150.00"},
+    {"__type__": "decimal", "value": "150.00"}
+  ],
+  [
+    2,
+    "Distribuidora Sur",
+    {"__type__": "decimal", "value": "85.50"},
+    {"__type__": "decimal", "value": "85.50"}
+  ]
+]

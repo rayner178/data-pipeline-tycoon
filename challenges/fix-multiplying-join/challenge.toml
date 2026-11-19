@@ -1,0 +1,25 @@
+id = "00000000-0000-0000-0000-000000000102"
+code = "fix-multiplying-join"
+module = "postgresql"
+title = "Corregir un JOIN que multiplica filas"
+description = "Al unir customers (id, name), orders (id, customer_id, total_amount) y payments (id, order_id, paid_amount), el pedido 10 tiene dos pagos parciales y duplica su total_amount. Devuelve por cada cliente: customer_id, name, total_ordered y total_paid sin multiplicar filas."
+difficulty = 2
+max_seconds = 2.0
+ordered = false
+starter_sql = """
+-- Esta consulta duplica montos al unir orders y payments directamente; corrígela
+SELECT
+    c.id AS customer_id,
+    c.name,
+    COALESCE(SUM(o.total_amount), 0) AS total_ordered,
+    COALESCE(SUM(p.paid_amount), 0) AS total_paid
+FROM customers c
+LEFT JOIN orders o ON o.customer_id = c.id
+LEFT JOIN payments p ON p.order_id = o.id
+GROUP BY c.id, c.name
+ORDER BY c.id;
+"""
+hints = [
+  "Pista 1/2: Unirse directamente a orders y payments multiplica las filas de pedidos cuando un pedido tiene varios pagos.",
+  "Pista 2/2: Preagrega orders por customer_id y payments por customer_id (uniendo payments -> orders) en CTEs antes de unirlos a customers.",
+]

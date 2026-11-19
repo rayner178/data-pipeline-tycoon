@@ -1,0 +1,23 @@
+id = "00000000-0000-0000-0000-000000000103"
+code = "index-slow-query"
+module = "postgresql"
+title = "Acelerar una consulta lenta aprovechando el índice"
+description = "La tabla events (id, user_id, created_at, kind) tiene 5,000 filas y el índice idx_events_user_created ON events (user_id, created_at). Consulta id, kind, created_at del usuario 42 desde '2026-08-01' (inclusive), ordenados por created_at ASC, id ASC, de modo que PostgreSQL utilice el índice."
+difficulty = 3
+max_seconds = 2.0
+ordered = true
+starter_sql = """
+-- Optimiza esta consulta para que PostgreSQL utilice idx_events_user_created
+SELECT
+    id,
+    kind,
+    created_at
+FROM events
+WHERE CAST(user_id AS TEXT) = '42'
+  AND created_at >= DATE '2026-08-01'
+ORDER BY created_at ASC, id ASC;
+"""
+hints = [
+  "Pista 1/2: Envolver user_id en CAST(user_id AS TEXT) rompe la sargabilidad y obliga a PostgreSQL a hacer Seq Scan.",
+  "Pista 2/2: Reemplaza la condición por user_id = 42 manteniendo created_at >= DATE '2026-08-01' para usar el índice compuesto.",
+]

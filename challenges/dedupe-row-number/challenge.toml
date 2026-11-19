@@ -1,0 +1,20 @@
+id = "00000000-0000-0000-0000-000000000101"
+code = "dedupe-row-number"
+module = "postgresql"
+title = "Eliminar duplicados con ROW_NUMBER()"
+description = "La tabla staging_customers (customer_id, full_name, email, updated_at) tiene registros repetidos por cliente. Devuelve exactamente una fila por cliente con su versión más reciente (mayor updated_at): columnas customer_id, full_name, email."
+difficulty = 1
+max_seconds = 2.0
+ordered = false
+starter_sql = """
+-- Conserva solo la fila más reciente (mayor updated_at) por customer_id
+SELECT
+    customer_id,
+    full_name,
+    email
+FROM staging_customers;
+"""
+hints = [
+  "Pista 1/2: Usa ROW_NUMBER() OVER (PARTITION BY customer_id ORDER BY updated_at DESC) dentro de una CTE (WITH ...).",
+  "Pista 2/2: Filtra en el SELECT externo con WHERE rn = 1 y proyecta únicamente customer_id, full_name y email.",
+]
