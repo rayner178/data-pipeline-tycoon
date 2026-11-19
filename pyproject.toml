@@ -25,6 +25,7 @@ dev = [
 # The code lives in top-level packages under src/ and is not installed;
 # pytest and mypy resolve it through their path settings below.
 package = false
+python-preference = "only-managed"
 
 [tool.ruff]
 target-version = "py312"
