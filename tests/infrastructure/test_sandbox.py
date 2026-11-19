@@ -3,10 +3,13 @@
 import re
 import time
 from decimal import Decimal
+from typing import Any
 from uuid import uuid4
 
+import psycopg
 import pytest
-from sqlalchemy import Engine, text
+from psycopg.errors import InsufficientPrivilege
+from sqlalchemy import Engine, create_engine, text
 
 from api.schemas import MAX_SQL_LENGTH
 from application.errors import EvaluatorError
@@ -69,6 +72,7 @@ def _count_sandbox_schemas(engine: Engine) -> int:
         "  WITH cte AS (SELECT 1 AS n) SELECT n FROM cte  ",
         "SELECT ';' AS semi, '-- not a comment' AS txt /* block */;",
         "SELECT $$semi;inside;dollar$$ AS s;",
+        "SELECT 'set_config(1)' AS literal_only;",
     ],
 )
 def test_validate_single_select_sql_accepts_valid_queries(sql: str) -> None:
@@ -96,6 +100,10 @@ def test_validate_single_select_sql_accepts_valid_queries(sql: str) -> None:
         "COPY items TO PROGRAM 'id';",
         "EXPLAIN SELECT 1;",
         "DO $$ BEGIN PERFORM 1; END $$;",
+        "SELECT set_config('role', 'tycoon', false);",
+        "SELECT SET_CONFIG /* bypass */ ('work_mem', '1GB', true);",
+        "SELECT pg_catalog.\"set_config\"('role', 'tycoon', false);",
+        "SELECT \"SET_CONFIG\"('statement_timeout', '0', false);",
     ],
 )
 def test_validate_single_select_sql_blocks_unsafe_or_multi_statements(sql: str) -> None:
@@ -132,6 +140,7 @@ def test_validate_single_select_sql_blocks_unsafe_or_multi_statements(sql: str) 
         "SET ROLE tycoon",
         "RESET ROLE",
         "SELECT set_config('role', 'tycoon', false)",
+        "SELECT pg_catalog.\"set_config\"('role', 'tycoon', false)",
         "SELECT set_config('statement_timeout', '0', false)",
         "SELECT set_config('search_path', 'public', false)",
         # Dangerous built-in functions and COPY
@@ -238,6 +247,169 @@ def test_sandbox_raises_evaluator_error_if_setup_fails(test_engine: Engine) -> N
         evaluator.evaluate(broken, "SELECT 1")
 
     assert _count_sandbox_schemas(test_engine) == 0
+
+
+# --- Neon hardening, resource limits and EXPLAIN ordering -------------------
+
+
+def test_make_conninfo_propagates_query_params_and_ignores_reserved() -> None:
+    neon_like = create_engine(
+        "postgresql+psycopg://appuser:secret@ep-demo.neon.tech:5432/neondb"
+        "?sslmode=require&channel_binding=require&host=evil&user=root"
+    )
+    neon_like.url = neon_like.url.set(
+        query={
+            "sslmode": "require",
+            "channel_binding": ("disable", "require"),
+            "host": "evil",
+            "port": "9999",
+            "dbname": "other",
+            "user": "superuser",
+            "password": "wrong",
+            "connect_timeout": "999",
+        }
+    )
+    evaluator = PostgresSandboxEvaluator(neon_like)
+
+    info = psycopg.conninfo.conninfo_to_dict(evaluator._sandbox_conninfo())
+
+    assert info["host"] == "ep-demo.neon.tech"
+    assert info["port"] == "5432"
+    assert info["dbname"] == "neondb"
+    assert info["user"] == SANDBOX_ROLE
+    assert info["connect_timeout"] == "5"
+    assert info["sslmode"] == "require"
+    assert info["channel_binding"] == "require"
+    neon_like.dispose()
+
+
+def test_sandbox_enforces_work_mem_and_temp_file_limit(test_engine: Engine) -> None:
+    evaluator = PostgresSandboxEvaluator(test_engine)
+
+    result = evaluator.evaluate(
+        SAFE_CHALLENGE,
+        "SELECT current_setting('work_mem'), current_setting('temp_file_limit')",
+    )
+
+    assert isinstance(result, ExecutionSucceeded)
+    assert result.rows == (("4MB", "10MB"),)
+
+
+def test_provision_tolerates_insufficient_privilege_on_neon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executed: list[str] = []
+
+    class _FakeConn:
+        def execute(self, stmt: Any, params: Any = None) -> Any:
+            sql_text = stmt.as_string() if hasattr(stmt, "as_string") else str(stmt)
+            executed.append(sql_text)
+            if "temp_file_limit" in sql_text or "pg_catalog." in sql_text:
+                raise InsufficientPrivilege("permission denied on managed postgres")
+            if "pg_roles" in sql_text:
+                return type("_R", (), {"fetchone": staticmethod(lambda: None)})()
+            return type("_R", (), {"fetchone": staticmethod(lambda: None)})()
+
+        def __enter__(self) -> "_FakeConn":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    evaluator = PostgresSandboxEvaluator(
+        create_engine("postgresql+psycopg://neondb_owner:pw@host:5432/neondb")
+    )
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **kw: _FakeConn())
+
+    evaluator._ensure_provisioned()
+
+    assert evaluator._provisioned is True
+    assert any("ALTER ROLE" in stmt and "work_mem" in stmt for stmt in executed)
+
+
+def test_explain_runs_before_player_query_and_not_timed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trace: list[str] = []
+
+    class _FakeTx:
+        def __enter__(self) -> "_FakeTx":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    class _FakeNamedCursor:
+        description = (type("_Col", (), {"name": "id"})(),)
+
+        def execute(self, sql_text: str) -> None:
+            trace.append(f"cursor:{sql_text}")
+
+        def fetchmany(self, n: int) -> list[tuple[Any, ...]]:
+            trace.append("fetchmany")
+            return [(1,)]
+
+        def __enter__(self) -> "_FakeNamedCursor":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    class _FakeSandboxConn:
+        def transaction(self, *, force_rollback: bool = False) -> _FakeTx:
+            assert force_rollback is True
+            return _FakeTx()
+
+        def execute(self, stmt: Any) -> Any:
+            sql_text = stmt.as_string() if hasattr(stmt, "as_string") else str(stmt)
+            trace.append(f"exec:{sql_text}")
+            if sql_text.startswith("EXPLAIN"):
+                return type(
+                    "_Exp",
+                    (),
+                    {
+                        "fetchall": staticmethod(
+                            lambda: [("Index Scan using idx on events",)]
+                        )
+                    },
+                )()
+            return None
+
+        def cursor(self, *, name: str) -> _FakeNamedCursor:
+            return _FakeNamedCursor()
+
+        def __enter__(self) -> "_FakeSandboxConn":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    indexed = Challenge(
+        id=uuid4(),
+        code="idx-order",
+        module="postgresql",
+        title="Idx",
+        description="Idx",
+        difficulty=Difficulty.HARD,
+        setup_sql="CREATE TABLE events (id INT); CREATE INDEX idx ON events(id);",
+        expected_result=((1,),),
+        max_seconds=2.0,
+    )
+    evaluator = PostgresSandboxEvaluator(
+        create_engine("postgresql+psycopg://u:p@localhost:5432/db")
+    )
+    evaluator._provisioned = True
+    monkeypatch.setattr(evaluator, "_prepare_schema", lambda *a: None)
+    monkeypatch.setattr(evaluator, "_drop_schema", lambda *a: None)
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **kw: _FakeSandboxConn())
+
+    result = evaluator.evaluate(indexed, "SELECT id FROM events WHERE id = 1")
+
+    assert isinstance(result, ExecutionSucceeded)
+    explain_idx = next(i for i, item in enumerate(trace) if "EXPLAIN" in item)
+    cursor_idx = next(i for i, item in enumerate(trace) if item.startswith("cursor:"))
+    assert explain_idx < cursor_idx
+    assert any("SET LOCAL work_mem = '4MB'" in item for item in trace)
 
 
 # --- All 3 MVP challenges (correct and incorrect solutions) -----------------

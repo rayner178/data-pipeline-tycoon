@@ -31,8 +31,12 @@ SANDBOX_ROLE = "tycoon_sandbox_player"
 _ALLOWED_START_KEYWORDS = frozenset({"SELECT", "WITH"})
 _FIRST_WORD_RE = re.compile(r"^\s*\(*\s*([A-Za-z_][A-Za-z0-9_]*)")
 _DOLLAR_TAG_RE = re.compile(r"^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+_FORBIDDEN_FUNCTION_RE = re.compile(r"\bset_config\s*\(", re.IGNORECASE)
 _SANDBOX_SCHEMA_RE = re.compile(r"sandbox_[0-9a-f]{32}")
 _INTERNAL_NAMES_RE = re.compile(r"\b(?:tycoon_sandbox_player|tycoon)\b")
+_RESERVED_CONNINFO_KEYS = frozenset(
+    {"host", "port", "dbname", "user", "password", "connect_timeout"}
+)
 
 _DANGEROUS_FUNCTIONS = (
     "pg_catalog.set_config(text, text, boolean)",
@@ -74,6 +78,8 @@ def validate_single_select_sql(
     match = _FIRST_WORD_RE.match(stripped_code)
     if not match or match.group(1).upper() not in _ALLOWED_START_KEYWORDS:
         raise ValueError("Solo se permiten consultas de lectura (SELECT o WITH).")
+    if _FORBIDDEN_FUNCTION_RE.search(stripped_code):
+        raise ValueError("No se permite invocar la función set_config.")
     return cleaned
 
 
@@ -123,6 +129,15 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
 
     def _make_conninfo(self, *, user: str, password: str) -> str:
         url = self._admin_engine.url
+        extra_params: dict[str, str] = {}
+        for key, raw_value in url.query.items():
+            if key in _RESERVED_CONNINFO_KEYS:
+                continue
+            if isinstance(raw_value, tuple):
+                if raw_value:
+                    extra_params[key] = str(raw_value[-1])
+            else:
+                extra_params[key] = str(raw_value)
         return psycopg.conninfo.make_conninfo(
             host=url.host or "localhost",
             port=url.port or 5432,
@@ -130,6 +145,7 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
             user=user,
             password=password,
             connect_timeout=5,
+            **extra_params,
         )
 
     def _ensure_provisioned(self) -> None:
@@ -190,13 +206,25 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
         ):
             conn.execute(stmt)
 
+        conn.execute(
+            pg_sql.SQL("ALTER ROLE {} SET work_mem = '4MB'").format(role_ident)
+        )
+        try:
+            conn.execute(
+                pg_sql.SQL("ALTER ROLE {} SET temp_file_limit = '10MB'").format(
+                    role_ident
+                )
+            )
+        except InsufficientPrivilege:
+            pass
+
         for fn_signature in _DANGEROUS_FUNCTIONS:
             try:
                 conn.execute(
                     f"REVOKE EXECUTE ON FUNCTION {fn_signature} "
                     f"FROM PUBLIC, {SANDBOX_ROLE}"
                 )
-            except UndefinedFunction:
+            except (UndefinedFunction, InsufficientPrivilege):
                 continue
 
     def _prepare_schema(self, schema_name: str, setup_sql: str) -> None:
@@ -255,11 +283,19 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
                         )
                     )
                     conn.execute("SET LOCAL lock_timeout = '500ms'")
+                    conn.execute("SET LOCAL work_mem = '4MB'")
                     conn.execute(
                         pg_sql.SQL("SET LOCAL search_path = {}, pg_catalog").format(
                             pg_sql.Identifier(schema_name)
                         )
                     )
+                    plan_text: str | None = None
+                    if challenge.requires_index_plan():
+                        explain_rows = conn.execute(
+                            f"EXPLAIN (COSTS OFF) {cleaned_sql}"
+                        ).fetchall()
+                        plan_text = "\n".join(str(row[0]) for row in explain_rows)
+                    started = time.perf_counter()
                     with conn.cursor(name="sandbox_cur") as cur:
                         cur.execute(cleaned_sql)
                         raw_rows = cur.fetchmany(self._max_rows + 1)
@@ -272,12 +308,6 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
                             ),
                             execution_ms=elapsed_ms,
                         )
-                    plan_text: str | None = None
-                    if challenge.requires_index_plan():
-                        explain_rows = conn.execute(
-                            f"EXPLAIN (COSTS OFF) {cleaned_sql}"
-                        ).fetchall()
-                        plan_text = "\n".join(str(row[0]) for row in explain_rows)
                     rows = _freeze_rows(raw_rows)
                     return ExecutionSucceeded(
                         rows=rows, execution_ms=elapsed_ms, plan=plan_text
@@ -386,19 +416,21 @@ def _scan_sql(raw_sql: str) -> tuple[str, list[int]]:
                 i += 1
             continue
 
-        # Double-quoted identifier
+        # Double-quoted identifier: keep identifier characters (without ';')
+        # so quoted function names such as "set_config" cannot bypass lexical checks.
         if ch == '"':
             out.append(" ")
             i += 1
             while i < n:
-                out.append(" ")
                 if raw_sql[i] == '"':
                     if i + 1 < n and raw_sql[i + 1] == '"':
-                        out.append(" ")
+                        out.extend((" ", " "))
                         i += 2
                         continue
+                    out.append(" ")
                     i += 1
                     break
+                out.append(" " if raw_sql[i] == ";" else raw_sql[i])
                 i += 1
             continue
 
