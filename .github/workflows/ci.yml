@@ -55,3 +55,31 @@ jobs:
 
       - name: Run test suite (pytest)
         run: uv run --frozen pytest
+
+      - name: Run E2E HTTP smoke test (Neon NOSUPERUSER simulation)
+        run: uv run --frozen python scripts/smoke_test_e2e.py
+
+  roblox-lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: roblox
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Selene 0.27.1
+        run: |
+          mkdir -p "$RUNNER_TEMP/selene"
+          curl -sSfL https://github.com/Kampfkarren/selene/releases/download/0.27.1/selene-0.27.1-linux.zip -o "$RUNNER_TEMP/selene.zip"
+          unzip -q "$RUNNER_TEMP/selene.zip" -d "$RUNNER_TEMP/selene"
+          chmod +x "$RUNNER_TEMP/selene/selene"
+          echo "$RUNNER_TEMP/selene" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/selene/selene" --version
+
+      - name: Generate Roblox standard library definition
+        run: selene generate-roblox-std
+
+      - name: Lint Luau scripts
+        run: selene src/
