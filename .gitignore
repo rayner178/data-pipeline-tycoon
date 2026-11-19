@@ -31,5 +31,6 @@ Thumbs.db
 
 # Roblox Studio & local secrets
 roblox/src/server/Secrets.luau
+roblox/roblox.yml
 *.rbxl
 *.rbxlx
