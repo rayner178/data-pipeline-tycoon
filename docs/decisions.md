@@ -152,3 +152,20 @@ Registro breve de las decisiones tomadas en cada fase. El alcance sigue definido
 - **Compatibilidad Local Server de Studio:** Si `player.UserId <= 0` con `RunService:IsStudio() == true`, `TerminalServer` mapea el ID a `900000000 + math.abs(player.UserId)` con advertencia en log; en servidores publicados rechaza todo `UserId <= 0`.
 - **Visuales estrictamente locales:** El coloreado de `PipelineNode_1..3` en `Workspace` ocurre únicamente en `TerminalGui.client.luau` para que el avance de un jugador no modifique los nodos visibles para otros jugadores en la misma sesión.
 
+## Fase 7 — Despliegue (Render + Neon) y CI Open Source
+
+### Rol de sandbox externo opcional (`SANDBOX_DATABASE_URL`)
+- `PostgresSandboxEvaluator` acepta `sandbox_database_url: str | None` opcional leído vía `get_sandbox_database_url()`.
+- Cuando no está definida (entorno local/Docker), mantiene el autoaprovisionamiento de `tycoon_sandbox_player`.
+- Cuando sí está definida (p. ej. rol creado en la consola de Neon), omite `CREATE ROLE`/`ALTER ROLE` (evitando errores de privilegios en proveedores gestionados), exige que el usuario sea distinto al de `DATABASE_URL` y vuelve a intentar de forma tolerante (`except InsufficientPrivilege`) los `REVOKE` sobre `public` y funciones de `pg_catalog` como defensa en profundidad.
+
+### Neon Direct Connection vs Pooler y fallback WSL2
+- Neon debe conectarse mediante su URL **Direct** (sin `-pooler`) con `?sslmode=require`, porque el sandbox requiere `SET LOCAL`, cursores nombrados en protocolo extendido y aislamiento por transacción incompatibles con el modo *transaction pooling* de PgBouncer.
+- `resolve_database_url` en `infrastructure/db.py` solo sondea WSL2 cuando `sys.platform == "win32"` y el host pertenece a `{localhost, 127.0.0.1}`, dejando intactas las URLs en Linux, Render, GitHub Actions y hosts remotos como `*.neon.tech`.
+
+### Arranque reproducible en Render y CI (`scripts/start_prod.sh`, `render.yaml`, `.github/workflows/ci.yml`)
+- `.gitattributes` fuerza finales de línea LF en `*.sh` para evitar errores `\r` al desplegar desde Windows hacia Linux/Render.
+- `render.yaml` instala `uv` y sincroniza dependencias sin paquetes de desarrollo (`pip install --upgrade uv && uv sync --frozen --no-dev`), y `scripts/start_prod.sh` ejecuta `alembic upgrade head`, `infrastructure.seed` y `uvicorn api.app:app --host 0.0.0.0 --port "${PORT:-8000}"` con `uv run --frozen --offline --no-dev` para no depender de descargas en tiempo de arranque.
+- `.github/workflows/ci.yml` levanta `postgres:16-alpine` con healthcheck `pg_isready` y valida `ruff check`, `ruff format --check`, `mypy` y `pytest` en cada `push` y `pull_request`.
+
+
