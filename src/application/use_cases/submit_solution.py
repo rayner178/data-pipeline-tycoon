@@ -11,7 +11,11 @@ from application.errors import (
     EvaluatorError,
     EvaluatorUnavailable,
 )
-from application.evaluation import EvaluationResult, ExecutionFailed
+from application.evaluation import (
+    EvaluationResult,
+    ExecutionFailed,
+    ExecutionSucceeded,
+)
 from application.ports import (
     AttemptRepository,
     ChallengeRepository,
@@ -24,8 +28,12 @@ from application.ports import (
 from domain.entities import Attempt, Challenge, Player
 from domain.errors import DomainValidationError
 from domain.execution_plan import plan_uses_index
+from domain.result_matching import Cell, FrozenResult, results_match
 
 logger = logging.getLogger(__name__)
+
+MAX_PREVIEW_ROWS = 10
+MAX_PREVIEW_CELL_LENGTH = 120
 
 MESSAGE_SOLVED = "¡Reto superado!"
 MESSAGE_MISMATCH = "El resultado no coincide con el esperado."
@@ -41,6 +49,8 @@ class _Outcome:
     execution_ms: int | None
     error_message: str | None
     message: str
+    columns: tuple[str, ...] = ()
+    preview_rows: tuple[tuple[str, ...], ...] = ()
 
 
 class SubmitSolution:
@@ -83,6 +93,8 @@ class SubmitSolution:
             passed=outcome.passed,
             execution_ms=outcome.execution_ms,
             message=outcome.message,
+            columns=outcome.columns,
+            preview_rows=outcome.preview_rows,
         )
 
     def _persist_attempt(
@@ -148,16 +160,87 @@ def _judge(challenge: Challenge, evaluation: EvaluationResult) -> _Outcome:
     if isinstance(evaluation, ExecutionFailed):
         message = evaluation.error_message
         return _Outcome(False, evaluation.execution_ms, message, message)
+    preview = _build_preview_rows(evaluation.rows)
     try:
         solved = challenge.is_solved_by(evaluation.rows)
     except DomainValidationError:
         return _Outcome(
-            False, evaluation.execution_ms, MESSAGE_INCOMPARABLE, MESSAGE_INCOMPARABLE
+            False,
+            evaluation.execution_ms,
+            MESSAGE_INCOMPARABLE,
+            MESSAGE_INCOMPARABLE,
+            columns=evaluation.columns,
+            preview_rows=preview,
         )
     if not solved:
-        return _Outcome(False, evaluation.execution_ms, None, MESSAGE_MISMATCH)
+        return _Outcome(
+            False,
+            evaluation.execution_ms,
+            None,
+            _diagnose_mismatch(challenge, evaluation),
+            columns=evaluation.columns,
+            preview_rows=preview,
+        )
     if challenge.requires_index_plan() and (
         evaluation.plan is None or not plan_uses_index(evaluation.plan)
     ):
-        return _Outcome(False, evaluation.execution_ms, None, MESSAGE_INDEX_NOT_USED)
-    return _Outcome(True, evaluation.execution_ms, None, MESSAGE_SOLVED)
+        return _Outcome(
+            False,
+            evaluation.execution_ms,
+            None,
+            MESSAGE_INDEX_NOT_USED,
+            columns=evaluation.columns,
+            preview_rows=preview,
+        )
+    return _Outcome(
+        True,
+        evaluation.execution_ms,
+        None,
+        MESSAGE_SOLVED,
+        columns=evaluation.columns,
+        preview_rows=preview,
+    )
+
+
+def _diagnose_mismatch(challenge: Challenge, evaluation: ExecutionSucceeded) -> str:
+    expected = challenge.expected_result
+    actual = evaluation.rows
+    expected_cols = len(expected[0]) if expected else 0
+    actual_cols = len(actual[0]) if actual else len(evaluation.columns)
+    if expected_cols > 0 and actual_cols > 0 and actual_cols != expected_cols:
+        return (
+            f"{MESSAGE_MISMATCH} Tu consulta devolvió {actual_cols} columna(s), "
+            f"pero se esperaban {expected_cols}."
+        )
+    if len(actual) != len(expected):
+        return (
+            f"{MESSAGE_MISMATCH} Tu consulta devolvió {len(actual)} fila(s), "
+            f"pero se esperaban {len(expected)}."
+        )
+    if challenge.ordered and results_match(actual, expected, ordered=False):
+        return (
+            f"{MESSAGE_MISMATCH} Las filas devueltas son correctas, "
+            "pero el orden no coincide (revisa el ORDER BY)."
+        )
+    return (
+        f"{MESSAGE_MISMATCH} La cantidad de filas y columnas es correcta, "
+        "pero los valores no coinciden."
+    )
+
+
+def _build_preview_rows(rows: FrozenResult) -> tuple[tuple[str, ...], ...]:
+    return tuple(
+        tuple(_format_preview_cell(cell) for cell in row)
+        for row in rows[:MAX_PREVIEW_ROWS]
+    )
+
+
+def _format_preview_cell(cell: Cell) -> str:
+    if cell is None:
+        return "NULL"
+    if isinstance(cell, bool):
+        return "true" if cell else "false"
+    text = str(cell)
+    if len(text) > MAX_PREVIEW_CELL_LENGTH:
+        return text[: MAX_PREVIEW_CELL_LENGTH - 3] + "..."
+    return text

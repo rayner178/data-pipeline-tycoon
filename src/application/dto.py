@@ -22,6 +22,8 @@ class SubmissionResult:
     passed: bool
     execution_ms: int | None
     message: str
+    columns: tuple[str, ...] = ()
+    preview_rows: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

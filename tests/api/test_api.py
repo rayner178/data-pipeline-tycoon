@@ -78,7 +78,9 @@ class _ApiTestEnv:
         self.challenges = InMemoryChallengeRepository(_make_challenges())
         self.attempts = InMemoryAttemptRepository()
         self.evaluator = evaluator or FakeEvaluator(
-            ExecutionSucceeded(rows=((1, "Ana"),), execution_ms=14)
+            ExecutionSucceeded(
+                rows=((1, "Ana"),), execution_ms=14, columns=("id", "name")
+            )
         )
         self.clock = FixedClock(NOW)
         self.ids = SequentialIdGenerator()
@@ -234,6 +236,8 @@ def test_submit_correct_solution_returns_passed() -> None:
         "passed": True,
         "execution_ms": 14,
         "message": "¡Reto superado!",
+        "columns": ["id", "name"],
+        "preview_rows": [["1", "Ana"]],
     }
     assert env.uow.committed == 1
 
@@ -254,6 +258,33 @@ def test_submit_wrong_solution_returns_failed() -> None:
     assert response.json()["execution_ms"] == 8
 
 
+def test_submit_truncates_preview_rows_to_10_and_formats_cells() -> None:
+    long_text = "B" * 140
+    rows = tuple((i, None, long_text) for i in range(12))
+    env = _ApiTestEnv(
+        FakeEvaluator(
+            ExecutionSucceeded(
+                rows=rows, execution_ms=8, columns=("id", "email", "notes")
+            )
+        )
+    )
+
+    response = env.client.post(
+        "/challenges/dedupe-row-number/submit",
+        headers=AUTH_HEADERS,
+        json={"roblox_user_id": 42, "sql": "SELECT 1;"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["passed"] is False
+    assert body["columns"] == ["id", "email", "notes"]
+    assert len(body["preview_rows"]) == 10
+    assert body["preview_rows"][0][1] == "NULL"
+    assert len(body["preview_rows"][0][2]) == 120
+    assert body["preview_rows"][0][2].endswith("...")
+
+
 def test_submit_player_sql_error_returns_failed_with_message() -> None:
     env = _ApiTestEnv(
         FakeEvaluator(
@@ -272,6 +303,8 @@ def test_submit_player_sql_error_returns_failed_with_message() -> None:
         "passed": False,
         "execution_ms": None,
         "message": "Error de sintaxis SQL",
+        "columns": [],
+        "preview_rows": [],
     }
 
 
@@ -532,8 +565,11 @@ def test_api_end_to_end_with_real_sql_sandbox() -> None:
             },
         )
         assert solved.status_code == 200
-        assert solved.json()["passed"] is True
-        assert solved.json()["execution_ms"] is not None
+        solved_body = solved.json()
+        assert solved_body["passed"] is True
+        assert solved_body["execution_ms"] is not None
+        assert solved_body["columns"] == ["customer_id", "full_name", "email"]
+        assert ["3", "Marta Díaz", "NULL"] in solved_body["preview_rows"]
 
         progress = client.get("/players/888/progress", headers=AUTH_HEADERS)
         assert progress.status_code == 200

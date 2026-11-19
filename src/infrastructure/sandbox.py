@@ -299,6 +299,11 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
                     with conn.cursor(name="sandbox_cur") as cur:
                         cur.execute(cleaned_sql)
                         raw_rows = cur.fetchmany(self._max_rows + 1)
+                        columns = (
+                            tuple(col.name for col in cur.description)
+                            if cur.description is not None
+                            else ()
+                        )
                     elapsed_ms = max(0, round((time.perf_counter() - started) * 1000))
                     if len(raw_rows) > self._max_rows:
                         return ExecutionFailed(
@@ -310,7 +315,10 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
                         )
                     rows = _freeze_rows(raw_rows)
                     return ExecutionSucceeded(
-                        rows=rows, execution_ms=elapsed_ms, plan=plan_text
+                        rows=rows,
+                        execution_ms=elapsed_ms,
+                        columns=columns,
+                        plan=plan_text,
                     )
         except QueryCanceled:
             elapsed_ms = max(0, round((time.perf_counter() - started) * 1000))

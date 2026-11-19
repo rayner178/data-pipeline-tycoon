@@ -78,6 +78,8 @@ def submit_solution(
         passed=result.passed,
         execution_ms=result.execution_ms,
         message=result.message,
+        columns=list(result.columns),
+        preview_rows=[list(row) for row in result.preview_rows],
     )
 
 

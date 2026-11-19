@@ -295,6 +295,25 @@ def test_sandbox_enforces_work_mem_and_temp_file_limit(test_engine: Engine) -> N
     assert result.rows == (("4MB", "10MB"),)
 
 
+def test_sandbox_captures_column_names_even_on_zero_rows(
+    test_engine: Engine,
+) -> None:
+    evaluator = PostgresSandboxEvaluator(test_engine)
+
+    with_rows = evaluator.evaluate(
+        SAFE_CHALLENGE, "SELECT id AS item_id, label FROM items ORDER BY id"
+    )
+    empty = evaluator.evaluate(
+        SAFE_CHALLENGE, "SELECT id AS item_id, label FROM items WHERE 1 = 0"
+    )
+
+    assert isinstance(with_rows, ExecutionSucceeded)
+    assert with_rows.columns == ("item_id", "label")
+    assert isinstance(empty, ExecutionSucceeded)
+    assert empty.rows == ()
+    assert empty.columns == ("item_id", "label")
+
+
 def test_provision_tolerates_insufficient_privilege_on_neon(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

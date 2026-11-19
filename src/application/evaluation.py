@@ -16,6 +16,7 @@ class ExecutionSucceeded:
 
     rows: FrozenResult
     execution_ms: int
+    columns: tuple[str, ...] = ()
     plan: str | None = None
 
 

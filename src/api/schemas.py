@@ -31,6 +31,8 @@ class SubmitSolutionResponse(BaseModel):
     passed: bool
     execution_ms: int | None
     message: str
+    columns: list[str] = Field(default_factory=list)
+    preview_rows: list[list[str]] = Field(default_factory=list)
 
 
 class CompletedChallengeResponse(BaseModel):
