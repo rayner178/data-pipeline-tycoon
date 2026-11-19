@@ -10,7 +10,7 @@ Plataforma de simulación gamificada para practicar y validar competencias de in
 - **3 retos** (dificultad creciente), por ejemplo:
   1. Eliminar duplicados con `ROW_NUMBER()`.
   2. Corregir un `JOIN` que multiplica filas.
-  3. Acelerar una consulta lenta creando el índice adecuado.
+  3. Acelerar una consulta lenta reescribiéndola (sargable) para aprovechar un índice compuesto existente (validada con `EXPLAIN`).
 - **3 endpoints:** listar retos, enviar solución, ver progreso.
 - **1 terminal interactiva** en Roblox que consume la API.
 - Pruebas automatizadas del dominio, de los casos de uso y de la API.
@@ -56,7 +56,7 @@ Reglas de dominio:
 | Método | Ruta | Descripción |
 |---|---|---|
 | GET | `/challenges` | Lista de retos disponibles |
-| POST | `/challenges/{code}/submit` | Envía SQL del jugador; devuelve `passed`, `execution_ms`, `message` |
+| POST | `/challenges/{code}/submit` | Envía SQL del jugador; devuelve `passed`, `execution_ms`, `message`, `columns`, `preview_rows` |
 | GET | `/players/{roblox_user_id}/progress` | Retos completados y mejores tiempos |
 
 Autenticación del MVP: encabezado `X-API-Key` (clave secreta compartida con el servidor de Roblox, nunca con el cliente).

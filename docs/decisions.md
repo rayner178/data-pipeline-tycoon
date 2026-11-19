@@ -123,3 +123,18 @@ Registro breve de las decisiones tomadas en cada fase. El alcance sigue definido
 ### Evaluación de plan `EXPLAIN` para el reto 3 (`domain/execution_plan.py`)
 - `Challenge.requires_index_plan()` detecta la presencia de `CREATE INDEX` en `setup_sql`.
 - Cuando es `True`, `PostgresSandboxEvaluator` ejecuta `EXPLAIN (COSTS OFF)` dentro de la misma transacción aislada y `SubmitSolution` exige resultado coincidente **y** uso de `Index Scan`, `Index Only Scan` o `Bitmap Index Scan` en el plan (`plan_uses_index`).
+
+## Fase 5.5 — Endurecimiento para Neon y preview diagnóstico
+
+### Reto 3 read-only (sin DDL del jugador)
+- El índice compuesto `idx_events_user_created` se crea en `setup_sql` y el jugador debe reescribir la consulta para que sea *sargable* y el planificador use `Index Scan` / `Bitmap Index Scan`. Así el sandbox se mantiene 100 % *read-only* (`SELECT` / `WITH` de una sola sentencia, sin DDL ni escritura del jugador), reduciendo la superficie de ataque y manteniendo uniforme la evaluación de resultados + `EXPLAIN`.
+
+### Endurecimiento del sandbox y compatibilidad con Neon (`infrastructure/sandbox.py`)
+- **Orden de `EXPLAIN` y medición:** `EXPLAIN (COSTS OFF)` se ejecuta **antes** que el cursor de la consulta del jugador dentro de la transacción de solo lectura (`force_rollback=True`), y `execution_ms` mide únicamente el tiempo de ejecución de la consulta (sin el `EXPLAIN`).
+- **Límites de memoria y disco temporal:** en cada transacción del sandbox se fija `SET LOCAL work_mem = '4MB'`. Como `temp_file_limit` es un parámetro de nivel `superuser` (`PGC_SUSET`), se configura en el rol mediante `ALTER ROLE tycoon_sandbox_player SET temp_file_limit = '10MB'` durante el aprovisionamiento (capturando `InsufficientPrivilege` en entornos administrados como Neon donde el dueño de base no es superusuario), evitando intentos repetidos dentro de la sesión del jugador.
+- **Compatibilidad con `neon_superuser` y bloqueo léxico de `set_config`:** la revocación sobre `pg_catalog` captura `(UndefinedFunction, InsufficientPrivilege)` y se compensa bloqueando léxicamente cualquier llamada a `set_config(...)` tanto sin comillas como con identificadores entre comillas dobles (`pg_catalog."set_config"(...)`).
+- **Parámetros de conexión SSL/query (`_make_conninfo`):** se propagan los parámetros de query de `DATABASE_URL` (p. ej. `sslmode=require`, `channel_binding`), ignorando claves reservadas (`host`, `port`, `dbname`, `user`, `password`, `connect_timeout`) y normalizando valores tupla de SQLAlchemy.
+
+### Preview de salida y feedback diagnóstico (`application/` y `api/`)
+- `POST /challenges/{code}/submit` devuelve también `columns` (`list[str]`) y `preview_rows` (`list[list[str]]`, máximo 10 filas de la salida que produjo la **propia** consulta del jugador, formateando `None` como `"NULL"` y truncando celdas > 120 caracteres), sin exponer jamás `expected_result` ni `setup_sql`.
+- Cuando la consulta se ejecuta sin error SQL pero el resultado no coincide con `expected_result`, `SubmitSolution` devuelve un diagnóstico accionable en español indicando si difiere el número de columnas, el número de filas, el orden (`ordered=True`) o los valores.
