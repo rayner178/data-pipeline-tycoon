@@ -10,12 +10,21 @@ _DEFAULT_ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
 
 def get_database_url(env_file: Path | None = None) -> str:
     """Read DATABASE_URL from environment (or .env) and normalize the psycopg driver."""
-    raw = os.environ.get("DATABASE_URL")
+    return _normalize_psycopg_scheme(_read_required_env_var("DATABASE_URL", env_file))
+
+
+def get_api_key(env_file: Path | None = None) -> str:
+    """Read API_KEY from environment (or .env)."""
+    return _read_required_env_var("API_KEY", env_file)
+
+
+def _read_required_env_var(name: str, env_file: Path | None = None) -> str:
+    raw = os.environ.get(name)
     if not raw or not raw.strip():
-        raw = _read_dotenv_var("DATABASE_URL", env_file or _DEFAULT_ENV_PATH)
+        raw = _read_dotenv_var(name, env_file or _DEFAULT_ENV_PATH)
     if not raw or not raw.strip():
-        raise RuntimeError("DATABASE_URL environment variable is required")
-    return _normalize_psycopg_scheme(raw.strip())
+        raise RuntimeError(f"{name} environment variable is required")
+    return raw.strip()
 
 
 def derive_test_database_url(

@@ -91,3 +91,19 @@ Registro breve de las decisiones tomadas en cada fase. El alcance sigue definido
 
 ### Seed idempotente (`infrastructure/seed.py`)
 - Los 3 retos del MVP se siembran de forma idempotente mediante `INSERT ... ON CONFLICT (code) DO UPDATE` con datos de ejemplo (`setup_sql` y `expected_result` provisionales hasta la fase 5).
+
+## Fase 4 — API (FastAPI)
+
+### Autenticación (`api/auth.py`)
+- Los endpoints del juego (`/challenges`, `/challenges/{code}/submit`, `/players/{roblox_user_id}/progress`) exigen el encabezado `X-API-Key` leído de `API_KEY` en el entorno.
+- Falta de encabezado o valor vacío responde `401`; clave distinta responde `403`. La comparación se hace en tiempo constante con `hmac.compare_digest` sobre UTF-8.
+- `GET /health` es público (sin `X-API-Key`) para sondas de disponibilidad de Docker/Render.
+
+### Validación de entrada y límite de SQL (`api/schemas.py`)
+- `SubmitSolutionRequest` rechaza campos extra (`extra="forbid"`), exige `roblox_user_id > 0` y fija `MAX_SQL_LENGTH = 8000` caracteres (en la fase 5 se reforzará este límite en el sandbox SQL).
+- Un envío solo con espacios pasa la longitud mínima de Pydantic y lo rechaza `SubmitSolution` con `EmptySubmission`, mapeado a `422`.
+
+### Errores y separación de capas (`api/app.py`, `api/routers.py`, `api/dependencies.py`)
+- Los routers no contienen lógica de negocio: solo reciben entrada validada, llaman al caso de uso y serializan el DTO de salida.
+- `EmptySubmission` → `422`, `ChallengeNotFound` → `404` y `EvaluatorUnavailable` → `503`, todos con mensajes fijos en español en `ErrorResponse(detail=...)` sin filtrar trazas, hosts ni credenciales internas.
+- Hasta la fase 5, la dependencia por defecto `get_solution_evaluator` devuelve un adaptador que lanza `EvaluatorError`, traducido limpiamente a `503`.
