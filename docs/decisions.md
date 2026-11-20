@@ -181,5 +181,13 @@ Registro breve de las decisiones tomadas en cada fase. El alcance sigue definido
 - Usa exclusivamente librería estándar (`urllib.request`, `urllib.parse`, `argparse`, `tomllib`) para funcionar sin dependencias extra (ni siquiera `httpx` de desarrollo), admitiendo flags globales (`--base-url`, `--api-key`, `--player-id`, `--timeout` de 65 s) antes o después del subcomando y escapando `code` con `urllib.parse.quote(code, safe="")`.
 - Se registró `tycoon-cli = "cli.app:main"` en `pyproject.toml` `[project.scripts]` manteniendo `[tool.uv] package = false` para no requerir descargas en `uv run --frozen --offline` y permitir tanto `python -m cli` (con `PYTHONPATH=src`) como `tycoon-cli` tras instalación editable.
 
+## Endurecimiento post-despliegue en producción (Neon + Render)
+
+### Referencias dinámicas a `self._sandbox_role` y guard *fail-closed* (`infrastructure/sandbox.py`)
+- **Bug de rol hardcodeado corregido:** cuando `SANDBOX_DATABASE_URL` utiliza un rol distinto al predeterminado (por ejemplo `tycoon_sandbox_ro`), todas las consultas en `_sandbox_conninfo`, `_provision_role_and_locks` y `_verify_sandbox_role_isolation` usan dinámicamente `self._sandbox_role`, evitando fallos `UndefinedObject: role "tycoon_sandbox_player" does not exist`. Además, si el rol configurado en `SANDBOX_DATABASE_URL` no existe en `pg_roles`, falla explícitamente con `EvaluatorError`.
+- **Trampa de `neon_superuser` / `pg_read_all_data` en la UI de Neon:** en pruebas reales sobre Neon se comprobó que los roles creados desde el botón *"Add Role"* del panel web reciben `neon_superuser` (que hereda `pg_read_all_data`), permitiéndoles leer `public.players` y `public.challenges` aunque `neondb_owner` ejecute `REVOKE ALL ON SCHEMA public`. Solo los roles creados mediante SQL explícito (`CREATE ROLE ... NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS`) quedan aislados.
+- **Defensa *fail-closed*:** `_ensure_provisioned()` ejecuta `_verify_sandbox_role_isolation()` después de los `REVOKE` sobre `public`; si el rol tiene `rolsuper`, es miembro (`pg_has_role(..., 'MEMBER')`, que cubre incluso roles `NOINHERIT`) de `pg_read_all_data`, `pg_write_all_data` o `neon_superuser`, o conserva `SELECT` (`has_table_privilege`) sobre alguna tabla existente de la app (`public.players`, `public.challenges`, `public.attempts`), registra el motivo en log y lanza `EvaluatorError` (HTTP `503`), impidiendo ejecutar SQL del jugador con privilegios excesivos.
+
+
 
 

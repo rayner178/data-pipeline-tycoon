@@ -325,6 +325,16 @@ def test_provision_tolerates_insufficient_privilege_on_neon(
             executed.append(sql_text)
             if "temp_file_limit" in sql_text or "pg_catalog." in sql_text:
                 raise InsufficientPrivilege("permission denied on managed postgres")
+            if "pg_read_all_data" in sql_text:
+                return type(
+                    "_R",
+                    (),
+                    {
+                        "fetchone": staticmethod(
+                            lambda: (False, False, False, False, False, False, False)
+                        )
+                    },
+                )()
             if "pg_roles" in sql_text:
                 return type("_R", (), {"fetchone": staticmethod(lambda: None)})()
             return type("_R", (), {"fetchone": staticmethod(lambda: None)})()
@@ -600,6 +610,18 @@ def test_external_sandbox_database_url_conninfo_and_skips_role_ddl(
             executed.append(sql_text)
             if "pg_catalog." in sql_text or "ALTER DEFAULT PRIVILEGES" in sql_text:
                 raise InsufficientPrivilege("permission denied on managed postgres")
+            if "pg_read_all_data" in sql_text:
+                return type(
+                    "_R",
+                    (),
+                    {
+                        "fetchone": staticmethod(
+                            lambda: (False, False, False, False, False, False, False)
+                        )
+                    },
+                )()
+            if "pg_roles" in sql_text:
+                return type("_R", (), {"fetchone": staticmethod(lambda: (1,))})()
             return None
 
         def __enter__(self) -> "_FakeAdminConn":
@@ -631,6 +653,7 @@ def test_external_sandbox_database_url_conninfo_and_skips_role_ddl(
 
     assert evaluator._provisioned is True
     assert not any("CREATE ROLE" in stmt or "ALTER ROLE" in stmt for stmt in executed)
+    assert not any(SANDBOX_ROLE in stmt for stmt in executed)
     assert any(
         "REVOKE ALL ON SCHEMA public" in stmt and '"neon_sandbox"' in stmt
         for stmt in executed
@@ -679,3 +702,118 @@ def test_sanitize_pg_error_masks_custom_external_roles() -> None:
     assert "neon_custom_sb" not in sanitized
     assert "0123456789abcdef" not in sanitized
     assert "sandbox_user" in sanitized
+
+
+def test_external_sandbox_role_works_when_default_role_does_not_exist(
+    test_engine: Engine,
+) -> None:
+    admin_conninfo = PostgresSandboxEvaluator(test_engine)._admin_conninfo()
+    custom_role = "tycoon_custom_ro"
+    custom_pw = "custom_ro_secret_pw"
+
+    with psycopg.connect(admin_conninfo, autocommit=True) as conn:
+        exists_default = conn.execute(
+            "SELECT 1 FROM pg_roles WHERE rolname = %s",
+            (SANDBOX_ROLE,),
+        ).fetchone()
+        if exists_default is not None:
+            conn.execute(f"DROP OWNED BY {SANDBOX_ROLE}")
+            conn.execute(f"DROP ROLE IF EXISTS {SANDBOX_ROLE}")
+        exists_custom = conn.execute(
+            "SELECT 1 FROM pg_roles WHERE rolname = %s",
+            (custom_role,),
+        ).fetchone()
+        if exists_custom is not None:
+            conn.execute(f"DROP OWNED BY {custom_role}")
+            conn.execute(f"DROP ROLE IF EXISTS {custom_role}")
+        conn.execute(
+            f"CREATE ROLE {custom_role} WITH LOGIN NOSUPERUSER NOCREATEDB "
+            f"NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD '{custom_pw}'"
+        )
+
+    try:
+        external_url = test_engine.url.set(
+            username=custom_role,
+            password=custom_pw,
+        ).render_as_string(hide_password=False)
+        evaluator = PostgresSandboxEvaluator(
+            test_engine, sandbox_database_url=external_url
+        )
+
+        result = evaluator.evaluate(
+            SAFE_CHALLENGE, "SELECT id, label FROM items ORDER BY id"
+        )
+
+        assert isinstance(result, ExecutionSucceeded)
+        assert result.rows == ((1, "uno"), (2, "dos"))
+        with psycopg.connect(admin_conninfo, autocommit=True) as conn:
+            still_missing = conn.execute(
+                "SELECT 1 FROM pg_roles WHERE rolname = %s",
+                (SANDBOX_ROLE,),
+            ).fetchone()
+        assert still_missing is None
+    finally:
+        with psycopg.connect(admin_conninfo, autocommit=True) as conn:
+            conn.execute(f"DROP OWNED BY {custom_role}")
+            conn.execute(f"DROP ROLE IF EXISTS {custom_role}")
+        assert _count_sandbox_schemas(test_engine) == 0
+
+
+def test_fail_closed_rejects_overprivileged_sandbox_role(
+    test_engine: Engine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admin_conninfo = PostgresSandboxEvaluator(test_engine)._admin_conninfo()
+    leaky_role = "tycoon_leaky_ro"
+    leaky_pw = "leaky_ro_secret_pw"
+
+    with psycopg.connect(admin_conninfo, autocommit=True) as conn:
+        exists_leaky = conn.execute(
+            "SELECT 1 FROM pg_roles WHERE rolname = %s",
+            (leaky_role,),
+        ).fetchone()
+        if exists_leaky is not None:
+            conn.execute(f"DROP OWNED BY {leaky_role}")
+            conn.execute(f"DROP ROLE IF EXISTS {leaky_role}")
+        conn.execute(
+            f"CREATE ROLE {leaky_role} WITH LOGIN NOSUPERUSER NOCREATEDB "
+            f"NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD '{leaky_pw}'"
+        )
+        conn.execute(f"GRANT pg_read_all_data TO {leaky_role}")
+
+    external_url = test_engine.url.set(
+        username=leaky_role,
+        password=leaky_pw,
+    ).render_as_string(hide_password=False)
+
+    try:
+        # Case A: pg_read_all_data (as assigned by Neon UI roles) must fail closed.
+        evaluator = PostgresSandboxEvaluator(
+            test_engine, sandbox_database_url=external_url
+        )
+        with pytest.raises(EvaluatorError, match="pg_read_all_data"):
+            evaluator.evaluate(SAFE_CHALLENGE, "SELECT 1")
+        assert evaluator._provisioned is False
+
+        # Case B: direct SELECT on public.challenges when REVOKE cannot strip it.
+        with psycopg.connect(admin_conninfo, autocommit=True) as conn:
+            conn.execute(f"REVOKE pg_read_all_data FROM {leaky_role}")
+            conn.execute(f"GRANT USAGE ON SCHEMA public TO {leaky_role}")
+            conn.execute(f"GRANT SELECT ON public.challenges TO {leaky_role}")
+
+        monkeypatch.setattr(
+            PostgresSandboxEvaluator,
+            "_provision_role_and_locks",
+            lambda self, conn: None,
+        )
+        evaluator_select = PostgresSandboxEvaluator(
+            test_engine, sandbox_database_url=external_url
+        )
+        with pytest.raises(EvaluatorError, match="SELECT on public.challenges"):
+            evaluator_select.evaluate(SAFE_CHALLENGE, "SELECT 1")
+        assert evaluator_select._provisioned is False
+    finally:
+        with psycopg.connect(admin_conninfo, autocommit=True) as conn:
+            conn.execute(f"DROP OWNED BY {leaky_role}")
+            conn.execute(f"DROP ROLE IF EXISTS {leaky_role}")
+        assert _count_sandbox_schemas(test_engine) == 0

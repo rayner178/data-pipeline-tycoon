@@ -1,5 +1,6 @@
 """Isolated, least-privilege PostgreSQL SQL sandbox evaluator (SPEC section 7)."""
 
+import logging
 import re
 import secrets
 import time
@@ -25,6 +26,8 @@ from application.ports import SolutionEvaluator
 from domain.entities import Challenge
 from domain.result_matching import Cell, FrozenResult
 from infrastructure.config import _normalize_psycopg_scheme
+
+logger = logging.getLogger(__name__)
 
 MAX_SQL_LENGTH = 8_000
 MAX_RESULT_ROWS = 1_000
@@ -154,7 +157,7 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
                 base_url=self._sandbox_url,
             )
         return self._make_conninfo(
-            user=SANDBOX_ROLE,
+            user=self._sandbox_role,
             password=self._sandbox_password,
         )
 
@@ -187,6 +190,9 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
         try:
             with psycopg.connect(self._admin_conninfo(), autocommit=True) as conn:
                 self._provision_role_and_locks(conn)
+                self._verify_sandbox_role_isolation(conn)
+        except EvaluatorError:
+            raise
         except psycopg.Error as exc:
             raise EvaluatorError("Failed to provision PostgreSQL sandbox role") from exc
         self._provisioned = True
@@ -196,12 +202,12 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
         role_ident = pg_sql.Identifier(self._sandbox_role)
         db_ident = pg_sql.Identifier(db_name)
 
+        role_exists = conn.execute(
+            "SELECT 1 FROM pg_roles WHERE rolname = %s",
+            (self._sandbox_role,),
+        ).fetchone()
         if self._sandbox_url is None:
             password_lit = pg_sql.Literal(self._sandbox_password)
-            role_exists = conn.execute(
-                "SELECT 1 FROM pg_roles WHERE rolname = %s",
-                (SANDBOX_ROLE,),
-            ).fetchone()
             if role_exists is None:
                 conn.execute(
                     pg_sql.SQL(
@@ -216,6 +222,11 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
                         "NOINHERIT NOREPLICATION NOBYPASSRLS PASSWORD {}"
                     ).format(role_ident, password_lit)
                 )
+        elif role_exists is None:
+            raise EvaluatorError(
+                f"Configured sandbox role {self._sandbox_role!r} "
+                "does not exist in PostgreSQL"
+            )
 
         for stmt in (
             pg_sql.SQL("REVOKE ALL ON SCHEMA public FROM PUBLIC, {}").format(
@@ -265,6 +276,91 @@ class PostgresSandboxEvaluator(SolutionEvaluator):
                 )
             except (UndefinedFunction, InsufficientPrivilege):
                 continue
+
+    def _verify_sandbox_role_isolation(self, conn: psycopg.Connection[Any]) -> None:
+        row = conn.execute(
+            """
+            SELECT
+                r.rolsuper,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM pg_roles WHERE rolname = 'pg_read_all_data'
+                    )
+                    THEN pg_has_role(r.oid, 'pg_read_all_data', 'MEMBER')
+                    ELSE FALSE
+                END,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM pg_roles WHERE rolname = 'pg_write_all_data'
+                    )
+                    THEN pg_has_role(r.oid, 'pg_write_all_data', 'MEMBER')
+                    ELSE FALSE
+                END,
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM pg_roles WHERE rolname = 'neon_superuser'
+                    )
+                    THEN pg_has_role(r.oid, 'neon_superuser', 'MEMBER')
+                    ELSE FALSE
+                END,
+                CASE
+                    WHEN to_regclass('public.players') IS NOT NULL
+                    THEN has_table_privilege(r.oid, 'public.players', 'SELECT')
+                    ELSE FALSE
+                END,
+                CASE
+                    WHEN to_regclass('public.challenges') IS NOT NULL
+                    THEN has_table_privilege(r.oid, 'public.challenges', 'SELECT')
+                    ELSE FALSE
+                END,
+                CASE
+                    WHEN to_regclass('public.attempts') IS NOT NULL
+                    THEN has_table_privilege(r.oid, 'public.attempts', 'SELECT')
+                    ELSE FALSE
+                END
+            FROM pg_roles r
+            WHERE r.rolname = %s
+            """,
+            (self._sandbox_role,),
+        ).fetchone()
+        if row is None:
+            raise EvaluatorError(
+                f"Sandbox role {self._sandbox_role!r} does not exist in pg_roles"
+            )
+        (
+            is_super,
+            can_read_all,
+            can_write_all,
+            is_neon_super,
+            can_read_players,
+            can_read_challenges,
+            can_read_attempts,
+        ) = (bool(v) for v in row)
+        violations: list[str] = []
+        if is_super:
+            violations.append("rolsuper=true")
+        if can_read_all:
+            violations.append("pg_read_all_data")
+        if can_write_all:
+            violations.append("pg_write_all_data")
+        if is_neon_super:
+            violations.append("neon_superuser")
+        if can_read_players:
+            violations.append("SELECT on public.players")
+        if can_read_challenges:
+            violations.append("SELECT on public.challenges")
+        if can_read_attempts:
+            violations.append("SELECT on public.attempts")
+        if violations:
+            details = ", ".join(violations)
+            logger.error(
+                "Refusing to run SQL sandbox with over-privileged role %r: %s",
+                self._sandbox_role,
+                details,
+            )
+            raise EvaluatorError(
+                f"Sandbox role {self._sandbox_role!r} is over-privileged ({details})"
+            )
 
     def _prepare_schema(self, schema_name: str, setup_sql: str) -> None:
         schema_ident = pg_sql.Identifier(schema_name)

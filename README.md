@@ -98,25 +98,35 @@ tycoon-cli play
 2. En **Connection Details**, selecciona la conexión **Direct** (**sin** `-pooler` en el hostname) con `?sslmode=require`.
    > **¿Por qué conexión directa (non-pooled)?** `PostgresSandboxEvaluator` utiliza `SET LOCAL`, cursores nombrados en protocolo extendido y comandos de esquema temporal incompatibles con el *transaction pooling* de PgBouncer.
 3. Guarda esa cadena como tu **`DATABASE_URL`** de producción (p. ej. `postgresql://neondb_owner:PASSWORD@ep-xxxx.region.aws.neon.tech/neondb?sslmode=require`).
-4. **Recomendado — crear rol restringido para `SANDBOX_DATABASE_URL`:**
-   En Neon, el rol dueño puede no tener permisos de `SUPERUSER` sobre ciertos parámetros globales. Crea un rol dedicado de mínimos privilegios desde el **SQL Editor** de Neon:
+4. **Obligatorio en Neon — crear rol restringido por SQL para `SANDBOX_DATABASE_URL`:**
+   > **Advertencia crítica de seguridad:** **NO** crees el rol del sandbox usando el botón *"Add Role"* de la interfaz web de Neon. Los roles creados desde la UI de Neon reciben automáticamente el rol `neon_superuser` (con `pg_read_all_data`), lo cual permite leer `public.players` y `public.challenges` aunque se ejecute `REVOKE`.
+   > El backend aplica un guard *fail-closed* al arrancar y responderá `503` rechazando ejecutar consultas si detecta `rolsuper`, `pg_read_all_data`, `pg_write_all_data`, `neon_superuser` o `SELECT` sobre las tablas de la aplicación.
+
+   Crea el rol únicamente desde el **SQL Editor** de Neon ejecutando:
    ```sql
-   CREATE ROLE tycoon_sandbox_player
-     WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS
-     PASSWORD 'REEMPLAZAR_CON_PASSWORD_SEGURO';
+   CREATE ROLE tycoon_sandbox_ro
+     LOGIN PASSWORD 'REEMPLAZAR_CON_PASSWORD_SEGURO'
+     NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
 
-   REVOKE ALL ON SCHEMA public FROM PUBLIC, tycoon_sandbox_player;
-   REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC, tycoon_sandbox_player;
-   REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, tycoon_sandbox_player;
-   REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC, tycoon_sandbox_player;
-   ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM PUBLIC, tycoon_sandbox_player;
-   REVOKE CREATE, TEMPORARY ON DATABASE neondb FROM PUBLIC, tycoon_sandbox_player;
+   REVOKE ALL ON SCHEMA public FROM PUBLIC, tycoon_sandbox_ro;
+   REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC, tycoon_sandbox_ro;
+   REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC, tycoon_sandbox_ro;
+   REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC, tycoon_sandbox_ro;
+   ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM PUBLIC, tycoon_sandbox_ro;
+   REVOKE CREATE, TEMPORARY ON DATABASE neondb FROM PUBLIC, tycoon_sandbox_ro;
 
-   ALTER ROLE tycoon_sandbox_player SET work_mem = '4MB';
+   ALTER ROLE tycoon_sandbox_ro SET work_mem = '4MB';
+   ```
+   Verifica en el mismo SQL Editor que el aislamiento real quedó aplicado:
+   ```sql
+   SELECT
+     pg_has_role('tycoon_sandbox_ro', 'pg_read_all_data', 'MEMBER') AS has_read_all,
+     has_table_privilege('tycoon_sandbox_ro', 'public.challenges', 'SELECT') AS can_read_challenges;
+   -- Ambos valores deben ser FALSE
    ```
    Luego arma `SANDBOX_DATABASE_URL` con la misma conexión **Direct** (sin `-pooler`) usando ese rol y contraseña:
-   `postgresql://tycoon_sandbox_player:REEMPLAZAR_CON_PASSWORD_SEGURO@ep-xxxx.region.aws.neon.tech/neondb?sslmode=require`.
-   *(Por defensa en profundidad, el backend vuelve a intentar los `REVOKE` sobre `public` de forma tolerante al iniciar el evaluador.)*
+   `postgresql://tycoon_sandbox_ro:REEMPLAZAR_CON_PASSWORD_SEGURO@ep-xxxx.region.aws.neon.tech/neondb?sslmode=require`.
+   *(Por defensa en profundidad, el backend vuelve a intentar los `REVOKE` sobre `public` y verifica el aislamiento fail-closed al inicializar el evaluador.)*
 
 ---
 
@@ -130,7 +140,7 @@ tycoon-cli play
    - `PYTHON_VERSION` = `3.12.13`
    - `PYTHONPATH` = `src`
    - `DATABASE_URL` = *(cadena directa de Neon con `?sslmode=require`)*
-   - `SANDBOX_DATABASE_URL` = *(cadena directa de `tycoon_sandbox_player` en Neon con `?sslmode=require`)*
+   - `SANDBOX_DATABASE_URL` = *(cadena directa de `tycoon_sandbox_ro` en Neon con `?sslmode=require`)*
    - `API_KEY` = *(clave aleatoria fuerte para `X-API-Key`)*
 3. Al desplegar, `scripts/start_prod.sh` ejecuta automáticamente `alembic upgrade head`, siembra de forma idempotente los 3 retos MVP (`infrastructure.seed`) y arranca `uvicorn api.app:app --host 0.0.0.0 --port "${PORT:-8000}"` usando `--frozen --offline --no-dev`.
 4. Verifica el despliegue:
